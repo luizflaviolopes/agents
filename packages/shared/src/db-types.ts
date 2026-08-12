@@ -1,6 +1,6 @@
 /**
  * Hand-written Row types mirroring the Postgres schema in
- * supabase/migrations/0001_init.sql. Keep the two in sync.
+ * supabase/migrations/. Keep the two in sync.
  */
 
 // ---------------------------------------------------------------------------
@@ -11,7 +11,13 @@ export type CloneStatus = "pending" | "cloning" | "ready" | "error";
 
 export type AgentRole = "manager" | "specialist";
 
-export type TaskSource = "web" | "telegram" | "manager" | "system";
+export type TaskSource =
+  | "web"
+  | "telegram"
+  | "manager"
+  | "system"
+  | "schedule"
+  | "agent";
 
 export type TaskStatus =
   | "queued"
@@ -39,6 +45,23 @@ export type MessageChannel = "web" | "telegram";
 
 export type McpServerType = "stdio" | "http" | "sse";
 
+export type PendingActionType =
+  | "slack_reply"
+  | "slack_message"
+  | "gmail_reply"
+  | "gmail_send";
+
+export type PendingActionStatus =
+  | "pending"
+  | "approved"
+  | "rejected"
+  | "executed"
+  | "failed";
+
+export type KnowledgeKind = "knowledge" | "voice";
+
+export type IntegrationType = "slack" | "gmail";
+
 // ---------------------------------------------------------------------------
 // JSONB payload shapes
 // ---------------------------------------------------------------------------
@@ -54,6 +77,25 @@ export interface McpServerConfig {
   /** For type 'http' | 'sse' */
   url?: string;
   env?: Record<string, string>;
+}
+
+/** Payload for pending_actions of type 'slack_reply' | 'slack_message'. */
+export interface SlackActionPayload {
+  channel: string;
+  /** Set when replying in a thread ('slack_reply'). */
+  thread_ts?: string;
+  text: string;
+}
+
+/** Payload for pending_actions of type 'gmail_reply' | 'gmail_send'. */
+export interface GmailActionPayload {
+  to: string;
+  cc?: string;
+  subject: string;
+  body: string;
+  /** Set when replying to an existing thread ('gmail_reply'). */
+  thread_id?: string;
+  in_reply_to_message_id?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -148,6 +190,57 @@ export interface RunLog {
   event_type: RunLogEventType;
   content: Record<string, unknown>; // jsonb
   created_at: string;
+}
+
+export interface ScheduleRow {
+  id: string;
+  project_id: string;
+  agent_id: string;
+  name: string;
+  interval_minutes: number;
+  task_title: string;
+  task_description: string;
+  enabled: boolean;
+  last_run_at: string | null;
+  next_run_at: string;
+  created_at: string;
+}
+
+export interface PendingActionRow {
+  id: string;
+  project_id: string;
+  task_id: string | null;
+  agent_id: string | null;
+  action_type: PendingActionType;
+  /** Human-readable summary shown for approval. */
+  preview: string;
+  /** Exact data the executor will send (Slack/Gmail action payload). */
+  payload: SlackActionPayload | GmailActionPayload;
+  status: PendingActionStatus;
+  error: string | null;
+  decided_at: string | null;
+  executed_at: string | null;
+  created_at: string;
+}
+
+export interface AgentKnowledgeRow {
+  id: string;
+  agent_id: string;
+  kind: KnowledgeKind;
+  title: string;
+  content: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface IntegrationRow {
+  id: string;
+  project_id: string;
+  type: IntegrationType;
+  /** jsonb credentials/config — only the worker's executor reads this. */
+  config: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface Message {

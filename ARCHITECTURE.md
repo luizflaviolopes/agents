@@ -174,6 +174,58 @@ schemas in the route files). API routes accept camelCase payloads and map to
 snake_case columns. Constants: `DEFAULT_MODEL`, `TASK_STATUSES`,
 `AGENT_ROLES` in `packages/shared/src/constants.ts`.
 
+## Automations layer (migration 0003)
+
+`supabase/migrations/0003_automations.sql` adds four tables (no RLS — the
+0002 default-privilege revokes cover them; only the service role has access)
+and extends `tasks.source` with `schedule` and `agent`.
+
+- **schedules** — recurring task templates. The worker's schedule loop scans
+  for rows where `enabled` and `next_run_at <= now()` (indexed on
+  `(enabled, next_run_at)`), inserts a `tasks` row (`source = 'schedule'`,
+  title/description from `task_title`/`task_description`, assigned to
+  `agent_id`), then sets `last_run_at = now()` and advances `next_run_at` by
+  `interval_minutes`.
+- **pending_actions** — approval-gated outbound actions. Agents **never send
+  anything directly**. Lifecycle: an agent proposes an action via the
+  `propose_action` MCP tool (writes a row with `action_type`
+  `slack_reply | slack_message | gmail_reply | gmail_send`, a human-readable
+  `preview`, and the exact `payload` the executor will send —
+  `SlackActionPayload` / `GmailActionPayload`) → the user approves or rejects
+  it in the web Review inbox or via Telegram inline buttons
+  (`status: pending → approved | rejected`, `decided_at` set; approval may
+  include an edited payload — `decidePendingActionSchema`) → the worker's
+  **deterministic executor** (plain code, no LLM) sends approved actions
+  using the project's `integrations` credentials and sets
+  `status: executed | failed` (`executed_at`, `error`).
+- **agent_knowledge** — persistent docs injected into an agent's system
+  prompt. All docs of an agent are prepended to its `instructions`; docs of
+  `kind = 'voice'` are grouped under a "Voice profiles" heading. Multiple
+  voices are supported — each voice doc should state WHO it is and WHEN it
+  applies in its own content, so the agent can pick the right voice per
+  message.
+- **integrations** — per-project outbound credentials (`type: slack | gmail`,
+  `config` jsonb, unique per `(project_id, type)`), used ONLY by the worker's
+  deterministic action executor. LLM agents never hold send credentials —
+  read-side credentials for MCP servers are configured per-agent via
+  `agents.mcp_servers`, as before.
+- **ask_agent subtask flow** — an agent tool that creates a child task for a
+  named agent in the same project (`source = 'agent'`, `parent_task_id` set
+  to the caller's task). The child is executed through the normal queue; the
+  calling agent polls the child task for completion and reads its `result`.
+
+`schedules` and `pending_actions` are in the `supabase_realtime` publication
+(worker wake-up hints, same as `tasks`). Shared contract: row types
+(`ScheduleRow`, `PendingActionRow`, `AgentKnowledgeRow`, `IntegrationRow`,
+payload shapes) in `packages/shared/src/db-types.ts`; zod schemas
+(`createScheduleSchema`, `updateScheduleSchema`, `decidePendingActionSchema`,
+`createKnowledgeSchema`, `updateKnowledgeSchema`,
+`slackIntegrationConfigSchema`, `gmailIntegrationConfigSchema`,
+`upsertIntegrationSchema`) in `packages/shared/src/schemas.ts`; constant
+arrays (`PENDING_ACTION_TYPES`, `PENDING_ACTION_STATUSES`,
+`KNOWLEDGE_KINDS`, `INTEGRATION_TYPES`) in
+`packages/shared/src/constants.ts`.
+
 ## Environment
 
 See `.env.example`: Supabase URL/keys, `ANTHROPIC_API_KEY`,
