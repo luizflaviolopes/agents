@@ -1,0 +1,21 @@
+# dependencies
+node_modules/
+
+# builds
+.next/
+dist/
+
+# env
+.env
+.env.*
+!.env.example
+
+# turbo
+.turbo/
+
+# worker workspace data (cloned repos)
+workspaces-data/
+
+# misc
+*.log
+.DS_Store
