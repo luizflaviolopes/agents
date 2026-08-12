@@ -32,6 +32,8 @@ const SOURCE_META: Record<
   telegram: { label: "telegram", variant: "info" },
   manager: { label: "manager", variant: "default" },
   system: { label: "system", variant: "muted" },
+  schedule: { label: "schedule", variant: "warning" },
+  agent: { label: "agent", variant: "secondary" },
 };
 
 export function SourceBadge({ source }: { source: TaskSource }) {

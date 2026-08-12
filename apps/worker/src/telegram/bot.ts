@@ -1,7 +1,9 @@
-import { Bot } from "grammy";
+import { Bot, InlineKeyboard } from "grammy";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import type { Profile, Project } from "@agent-fleet/shared";
+import type { PendingActionRow, Profile, Project } from "@agent-fleet/shared";
 import { logger } from "../lib/logger.js";
+
+const ACTION_PREVIEW_MAX_CHARS = 1_000;
 
 /**
  * grammY bot (long polling).
@@ -84,6 +86,57 @@ export class TelegramBot {
     } catch (err) {
       logger.error("telegram", `notifyProject failed for project ${projectId}`, err);
     }
+  }
+
+  /**
+   * Sends the project owner an approval request for a newly proposed pending
+   * action, with inline Approve/Reject buttons. Never throws.
+   */
+  async notifyPendingAction(
+    action: PendingActionRow,
+    projectName: string,
+    agentName?: string,
+  ): Promise<void> {
+    try {
+      const chatId = await this.ownerChatId(action.project_id);
+      if (!chatId) return;
+
+      const preview =
+        action.preview.length > ACTION_PREVIEW_MAX_CHARS
+          ? `${action.preview.slice(0, ACTION_PREVIEW_MAX_CHARS)}…`
+          : action.preview;
+      const text =
+        `🔔 Approval needed — ${action.action_type}\n` +
+        `Project: ${projectName}\n` +
+        `Agent: ${agentName ?? "unknown"}\n\n` +
+        preview;
+      const keyboard = new InlineKeyboard()
+        .text("✅ Approve", `pa:approve:${action.id}`)
+        .text("❌ Reject", `pa:reject:${action.id}`);
+
+      await this.bot.api.sendMessage(chatId, text, { reply_markup: keyboard });
+    } catch (err) {
+      logger.error("telegram", `notifyPendingAction failed for action ${action.id}`, err);
+    }
+  }
+
+  /** Resolves the project owner's linked chat id, or null. */
+  private async ownerChatId(projectId: string): Promise<string | null> {
+    const { data: project, error: projectError } = await this.supabase
+      .from("projects")
+      .select("owner_id")
+      .eq("id", projectId)
+      .maybeSingle();
+    if (projectError || !project) return null;
+
+    const { data: profile, error: profileError } = await this.supabase
+      .from("profiles")
+      .select("telegram_chat_id")
+      .eq("id", (project as { owner_id: string }).owner_id)
+      .maybeSingle();
+    if (profileError || !profile) return null;
+
+    return (profile as { telegram_chat_id: string | null }).telegram_chat_id;
   }
 
   // ------------------------------------------------------------- handlers
@@ -191,6 +244,52 @@ export class TelegramBot {
       } catch (err) {
         logger.error("telegram", "/use failed", err);
         await ctx.reply("Something went wrong. Please try again.");
+      }
+    });
+
+    // Approve/Reject buttons on pending-action notifications.
+    this.bot.callbackQuery(/^pa:(approve|reject):(.+)$/, async (ctx) => {
+      const match = ctx.match as RegExpMatchArray;
+      const decision = match[1] === "approve" ? "approved" : "rejected";
+      const actionId = match[2];
+      try {
+        // Only flip actions that are still pending; a second click (or a web
+        // decision that already happened) leaves the row untouched.
+        const { data, error } = await this.supabase
+          .from("pending_actions")
+          .update({ status: decision, decided_at: new Date().toISOString() })
+          .eq("id", actionId)
+          .eq("status", "pending")
+          .select("id");
+        if (error) throw new Error(error.message);
+
+        if (!data || data.length === 0) {
+          await ctx.answerCallbackQuery({ text: "Already decided" });
+          return;
+        }
+
+        await ctx.answerCallbackQuery({
+          text: decision === "approved" ? "Approved — sending" : "Rejected",
+        });
+        logger.info("telegram", `pending action ${actionId} ${decision} via inline button`);
+
+        const original = ctx.callbackQuery.message?.text;
+        if (original) {
+          try {
+            await ctx.editMessageText(
+              `${original}\n\n${decision === "approved" ? "✅ Approved" : "❌ Rejected"}`,
+            );
+          } catch (err) {
+            logger.warn("telegram", `failed to edit approval message for action ${actionId}`, err);
+          }
+        }
+      } catch (err) {
+        logger.error("telegram", `pending action decision failed for ${actionId}`, err);
+        try {
+          await ctx.answerCallbackQuery({ text: "Something went wrong — try again" });
+        } catch {
+          // answering can itself fail if the query expired; nothing to do
+        }
       }
     });
 

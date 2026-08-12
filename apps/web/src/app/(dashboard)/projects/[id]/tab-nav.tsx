@@ -1,16 +1,45 @@
 "use client";
 
+import * as React from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { api } from "@/lib/api-client";
+import { usePolling } from "@/lib/use-polling";
 import { cn } from "@/lib/utils";
 
 const TABS = [
   { segment: "", label: "Board" },
+  { segment: "review", label: "Review" },
   { segment: "chat", label: "Chat" },
   { segment: "agents", label: "Agents" },
+  { segment: "schedules", label: "Schedules" },
   { segment: "workspaces", label: "Workspaces" },
   { segment: "activity", label: "Activity" },
 ];
+
+/**
+ * Small badge with the number of actions awaiting approval. Polls every 5s
+ * (cheap: one filtered GET) so the count is visible from any tab.
+ */
+function PendingCountBadge({ projectId }: { projectId: string }) {
+  const { data: count } = usePolling<number>(
+    React.useCallback(async () => {
+      const { actions } = await api<{ actions: unknown[] }>(
+        `/api/projects/${projectId}/pending-actions?status=pending`,
+      );
+      return actions.length;
+    }, [projectId]),
+    5000,
+    [projectId],
+  );
+
+  if (!count) return null;
+  return (
+    <span className="ml-1.5 inline-flex min-w-4 items-center justify-center rounded-full bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-semibold leading-none text-amber-400">
+      {count}
+    </span>
+  );
+}
 
 export function TabNav({ projectId }: { projectId: string }) {
   const pathname = usePathname();
@@ -35,6 +64,9 @@ export function TabNav({ projectId }: { projectId: string }) {
             )}
           >
             {tab.label}
+            {tab.segment === "review" && (
+              <PendingCountBadge projectId={projectId} />
+            )}
           </Link>
         );
       })}

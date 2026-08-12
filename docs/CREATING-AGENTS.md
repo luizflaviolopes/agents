@@ -150,6 +150,10 @@ Anything you put in `env` (tokens, etc.) is stored in the database and passed
 to the spawned process — prefer servers that can read secrets from the
 worker's own environment where possible.
 
+For full worked examples of MCP-powered agents — Slack and Gmail triage
+agents with ready-to-paste configs, instructions, and voice profiles — see
+[COMMS-AGENTS.md](COMMS-AGENTS.md).
+
 ## The `plugins` field (roadmap)
 
 `plugins` is a free-form array of strings (e.g. `["code-review", "pdf"]`).

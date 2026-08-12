@@ -2,6 +2,7 @@
 
 import * as React from "react";
 import {
+  BookOpen,
   Bot,
   FolderGit2,
   Pencil,
@@ -38,6 +39,7 @@ import {
   rowToMcpConfig,
   type AgentFormValue,
 } from "./agent-form";
+import { KnowledgeDialog } from "./knowledge-dialog";
 
 interface BuilderProposal {
   name?: string;
@@ -61,6 +63,9 @@ export function AgentsPanel({
   const [agents, setAgents] = React.useState<Agent[]>(initialAgents);
   const [createOpen, setCreateOpen] = React.useState(false);
   const [editAgent, setEditAgent] = React.useState<Agent | null>(null);
+  const [knowledgeAgent, setKnowledgeAgent] = React.useState<Agent | null>(
+    null,
+  );
   const [deleteAgent, setDeleteAgent] = React.useState<Agent | null>(null);
 
   const workspaceName = (id: string | null) =>
@@ -165,6 +170,14 @@ export function AgentsPanel({
                     <Pencil />
                     Edit
                   </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setKnowledgeAgent(agent)}
+                  >
+                    <BookOpen />
+                    Knowledge
+                  </Button>
                   {agent.role !== "manager" && (
                     <Button
                       variant="ghost"
@@ -198,6 +211,11 @@ export function AgentsPanel({
         onSaved={(agent) =>
           setAgents((prev) => prev.map((a) => (a.id === agent.id ? agent : a)))
         }
+      />
+
+      <KnowledgeDialog
+        agent={knowledgeAgent}
+        onClose={() => setKnowledgeAgent(null)}
       />
 
       <ConfirmDialog

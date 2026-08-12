@@ -2,11 +2,14 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import dotenv from "dotenv";
 import { logger } from "./lib/logger.js";
+import { Semaphore } from "./lib/semaphore.js";
 import { createServiceClient } from "./lib/supabase.js";
 import { WorkspaceManager } from "./workspaces/manager.js";
 import { TaskExecutor } from "./runner/executor.js";
-import { TaskPoller } from "./queue/poller.js";
+import { TaskPoller, MAX_CONCURRENT_TASKS } from "./queue/poller.js";
 import { ManagerListener } from "./manager/listener.js";
+import { Scheduler } from "./scheduler/scheduler.js";
+import { ActionExecutor } from "./actions/executor.js";
 import { TelegramBot } from "./telegram/bot.js";
 
 // ---------------------------------------------------------------------- env
@@ -59,9 +62,14 @@ async function main(): Promise<void> {
   const supabase = createServiceClient(config.supabaseUrl, config.serviceRoleKey);
 
   const workspaces = new WorkspaceManager(supabase, config.workspacesRoot, config.githubToken);
-  const executor = new TaskExecutor(supabase, workspaces, config.workspacesRoot);
-  const poller = new TaskPoller(supabase, (task) => executor.executeTask(task));
+  // Task slots shared between the poller and the executor's ask_agent tool
+  // (which releases its slot while waiting on a child task).
+  const taskSlots = new Semaphore(MAX_CONCURRENT_TASKS);
+  const executor = new TaskExecutor(supabase, workspaces, config.workspacesRoot, taskSlots);
+  const poller = new TaskPoller(supabase, taskSlots, (task) => executor.executeTask(task));
   const managerListener = new ManagerListener(supabase);
+  const scheduler = new Scheduler(supabase);
+  const actionExecutor = new ActionExecutor(supabase);
 
   let telegramBot: TelegramBot | undefined;
   if (config.telegramBotToken) {
@@ -69,6 +77,10 @@ async function main(): Promise<void> {
     const notifier = (projectId: string, text: string) => telegramBot!.notifyProject(projectId, text);
     executor.setTelegramNotifier(notifier);
     managerListener.setTelegramNotifier(notifier);
+    actionExecutor.setTelegramNotifier(notifier);
+    executor.setPendingActionNotifier((action, projectName, agentName) =>
+      telegramBot!.notifyPendingAction(action, projectName, agentName),
+    );
     telegramBot.start();
   } else {
     logger.info("worker", "TELEGRAM_BOT_TOKEN not set — Telegram bot disabled");
@@ -77,6 +89,8 @@ async function main(): Promise<void> {
   workspaces.startSweep();
   await poller.start();
   managerListener.start();
+  scheduler.start();
+  actionExecutor.start();
 
   logger.info("worker", "all subsystems running");
 
@@ -88,6 +102,8 @@ async function main(): Promise<void> {
     shuttingDown = true;
     logger.info("worker", `received ${signal} — shutting down`);
     try {
+      scheduler.stop();
+      await actionExecutor.stop();
       await poller.stop();
       await managerListener.stop();
       workspaces.stopSweep();

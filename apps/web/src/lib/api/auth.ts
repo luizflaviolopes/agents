@@ -4,7 +4,10 @@ import type { User } from "@supabase/supabase-js";
 import type { z } from "zod";
 import type {
   Agent,
+  AgentKnowledgeRow,
+  PendingActionRow,
   Project,
+  ScheduleRow,
   Task,
   TaskRun,
   Workspace,
@@ -165,6 +168,63 @@ export async function requireRunAccess(
   if (!run) throw new ApiResponseError(jsonError(404, "Run not found"));
   await requireTaskAccess(userId, (run as TaskRun).task_id);
   return run as TaskRun;
+}
+
+/** Pending-action access: walk pending_action → project → owner. */
+export async function requirePendingActionAccess(
+  userId: string,
+  actionId: string,
+): Promise<PendingActionRow> {
+  const admin = getAdminClient();
+  const { data: action, error } = await admin
+    .from("pending_actions")
+    .select("*")
+    .eq("id", actionId)
+    .maybeSingle();
+  if (error) throw new ApiResponseError(jsonError(500, error.message));
+  if (!action) {
+    throw new ApiResponseError(jsonError(404, "Pending action not found"));
+  }
+  await requireProjectAccess(userId, (action as PendingActionRow).project_id);
+  return action as PendingActionRow;
+}
+
+/** Schedule access: walk schedule → project → owner. */
+export async function requireScheduleAccess(
+  userId: string,
+  scheduleId: string,
+): Promise<ScheduleRow> {
+  const admin = getAdminClient();
+  const { data: schedule, error } = await admin
+    .from("schedules")
+    .select("*")
+    .eq("id", scheduleId)
+    .maybeSingle();
+  if (error) throw new ApiResponseError(jsonError(500, error.message));
+  if (!schedule) {
+    throw new ApiResponseError(jsonError(404, "Schedule not found"));
+  }
+  await requireProjectAccess(userId, (schedule as ScheduleRow).project_id);
+  return schedule as ScheduleRow;
+}
+
+/** Knowledge-doc access: walk doc → agent → project → owner. */
+export async function requireKnowledgeAccess(
+  userId: string,
+  docId: string,
+): Promise<AgentKnowledgeRow> {
+  const admin = getAdminClient();
+  const { data: doc, error } = await admin
+    .from("agent_knowledge")
+    .select("*")
+    .eq("id", docId)
+    .maybeSingle();
+  if (error) throw new ApiResponseError(jsonError(500, error.message));
+  if (!doc) {
+    throw new ApiResponseError(jsonError(404, "Knowledge doc not found"));
+  }
+  await requireAgentAccess(userId, (doc as AgentKnowledgeRow).agent_id);
+  return doc as AgentKnowledgeRow;
 }
 
 /**

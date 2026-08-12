@@ -1,7 +1,14 @@
 "use client";
 
 import * as React from "react";
-import { ChevronDown, ChevronRight, CircleSlash, History } from "lucide-react";
+import Link from "next/link";
+import {
+  ChevronDown,
+  ChevronRight,
+  CircleSlash,
+  History,
+  Inbox,
+} from "lucide-react";
 import type { RunLog, Task, TaskRun } from "@agent-fleet/shared";
 import { api } from "@/lib/api-client";
 import { usePolling } from "@/lib/use-polling";
@@ -74,6 +81,16 @@ export function TaskDetailDialog({
             </DialogHeader>
 
             <div className="max-h-[60vh] space-y-5 overflow-y-auto pr-1">
+              {task.status === "review" && (
+                <Link
+                  href={`/projects/${task.project_id}/review`}
+                  className="flex items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-400 transition-colors hover:bg-amber-500/15"
+                >
+                  <Inbox className="size-4 shrink-0" />
+                  View pending approvals → Review tab
+                </Link>
+              )}
+
               <section>
                 <h3 className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
                   Description

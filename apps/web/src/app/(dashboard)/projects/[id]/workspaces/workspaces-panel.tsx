@@ -27,6 +27,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { CloneStatusBadge } from "@/components/badges";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { EmptyState } from "@/components/empty-state";
+import { IntegrationsCard } from "./integrations-card";
 
 interface WorkspacesPayload {
   workspaces: Workspace[];
@@ -77,6 +78,8 @@ export function WorkspacesPanel({ projectId }: { projectId: string }) {
 
   return (
     <div className="mx-auto max-w-5xl px-8 py-6">
+      <IntegrationsCard projectId={projectId} />
+
       <div className="mb-5 flex items-center justify-between">
         <p className="text-sm text-muted-foreground">
           Workspaces are folders of cloned repositories on the worker&apos;s

@@ -61,6 +61,13 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the full domain model, and
 [docs/CREATING-AGENTS.md](docs/CREATING-AGENTS.md) for how to write good
 agents.
 
+## Guides
+
+- **Communication agents (Slack & Gmail)** —
+  [docs/COMMS-AGENTS.md](docs/COMMS-AGENTS.md): triage agents that read your
+  Slack/Gmail via MCP, draft replies in your voice, and propose every
+  outbound message for your approval before anything is sent.
+
 ## Repository layout
 
 ```
