@@ -119,13 +119,16 @@ it, then do the same with `supabase/migrations/0002_backend_authz.sql`.
 
 ### 3. Get your Supabase keys
 
-In the Supabase dashboard: **Settings → API**. You need three values:
+In the Supabase dashboard: **Project Settings → API Keys**. You need three
+values. Supabase now issues `sb_publishable_...` / `sb_secret_...` keys (the
+legacy `anon` / `service_role` JWT keys are deprecated but still accepted —
+the env var names are kept for compatibility):
 
 | Value | Goes into |
 |---|---|
 | Project URL | `NEXT_PUBLIC_SUPABASE_URL` |
-| `anon` / public key | `NEXT_PUBLIC_SUPABASE_ANON_KEY` (browser — auth only) |
-| `service_role` key | `SUPABASE_SERVICE_ROLE_KEY` (web server + worker — never in the browser) |
+| Publishable key (`sb_publishable_...`, legacy `anon`) | `NEXT_PUBLIC_SUPABASE_ANON_KEY` (browser — auth only) |
+| Secret key (`sb_secret_...`, create one; legacy `service_role`) | `SUPABASE_SERVICE_ROLE_KEY` (web server + worker — never in the browser) |
 
 ### 4. (Optional) Create a Telegram bot
 
