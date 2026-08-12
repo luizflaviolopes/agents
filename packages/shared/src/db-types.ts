@@ -180,6 +180,16 @@ export interface TaskRun {
   error: string | null;
   started_at: string;
   finished_at: string | null;
+  /**
+   * Usage/cost columns (0004) — populated by the worker from the Agent SDK
+   * result message; all null when the run crashed before a result arrived.
+   */
+  model: string | null;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  cache_read_tokens: number | null;
+  cache_creation_tokens: number | null;
+  cost_usd: number | null;
 }
 
 export interface RunLog {

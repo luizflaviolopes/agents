@@ -7,6 +7,7 @@ import {
   tool,
   type McpServerConfig as SdkMcpServerConfig,
   type Options as AgentSdkOptions,
+  type SDKResultMessage,
 } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import {
@@ -30,6 +31,19 @@ const RESULT_SUMMARY_MAX_CHARS = 1_500;
 const MAX_TURNS = 100;
 const ASK_AGENT_POLL_MS = 3_000;
 const ASK_AGENT_TIMEOUT_MS = 10 * 60_000;
+
+/**
+ * Usage totals extracted from the SDK result message, written to the
+ * task_runs cost columns (migration 0004). Null when no result arrived.
+ */
+interface RunUsage {
+  model: string;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_creation_tokens: number;
+  cost_usd: number;
+}
 
 /** Sends a completion notice over Telegram to the project owner's linked chat. */
 export type TelegramNotifier = (projectId: string, text: string) => Promise<void>;
@@ -137,16 +151,17 @@ export class TaskExecutor {
         mcp_servers: Object.keys(mcpServers),
       });
 
-      // 5. Stream SDK messages into run_logs and capture the final result.
-      const { resultText, failure } = await this.streamQuery(prompt, options, runLog);
+      // 5. Stream SDK messages into run_logs and capture the final result
+      //    (plus token/cost usage from the result message, when one arrived).
+      const { resultText, failure, usage } = await this.streamQuery(prompt, options, runLog);
 
       // 6. Record the outcome. A run that proposed pending actions lands in
       //    'review' (the user still has to approve/reject the sends).
       if (failure) {
-        await this.markRun(run.id, "failed", failure);
+        await this.markRun(run.id, "failed", failure, usage);
         await this.finishTask(task, agent, "failed", failure);
       } else {
-        await this.markRun(run.id, "succeeded", null);
+        await this.markRun(run.id, "succeeded", null, usage);
         const finalStatus: TaskStatus = runState.pendingActionsCreated > 0 ? "review" : "done";
         await this.finishTask(task, agent, finalStatus, resultText ?? "");
       }
@@ -154,7 +169,7 @@ export class TaskExecutor {
       const message = err instanceof Error ? err.message : String(err);
       logger.error("executor", `task ${task.id} crashed: ${message}`, err);
       await runLog.write("error", { message }, "error");
-      await this.markRun(run.id, "failed", message);
+      await this.markRun(run.id, "failed", message, null);
       await this.finishTask(task, agent, "failed", message);
     }
   }
@@ -164,10 +179,11 @@ export class TaskExecutor {
     prompt: string,
     options: AgentSdkOptions,
     runLog: RunLogWriter,
-  ): Promise<{ resultText: string | null; failure: string | null }> {
+  ): Promise<{ resultText: string | null; failure: string | null; usage: RunUsage | null }> {
     let resultText: string | null = null;
     let failure: string | null = null;
     let sawResult = false;
+    let usage: RunUsage | null = null;
     const toolNamesById = new Map<string, string>();
 
     for await (const message of query({ prompt, options })) {
@@ -225,19 +241,27 @@ export class TaskExecutor {
         }
         case "result": {
           sawResult = true;
+          // Both result subtypes carry usage/cost data — capture it either way.
+          usage = extractRunUsage(message, options.model ?? DEFAULT_MODEL);
           if (message.subtype === "success") {
             resultText = message.result;
-            await runLog.write("status", {
-              status: "finished",
-              num_turns: message.num_turns,
-              duration_ms: message.duration_ms,
-              total_cost_usd: message.total_cost_usd,
-            });
           } else {
             const errors = message.errors?.length ? message.errors.join("; ") : message.subtype;
             failure = `Agent run ended with ${message.subtype}: ${errors}`;
             await runLog.write("error", { subtype: message.subtype, errors: message.errors }, "error");
           }
+          await runLog.write("status", {
+            status: "finished",
+            subtype: message.subtype,
+            num_turns: message.num_turns,
+            duration_ms: message.duration_ms,
+            model: usage.model,
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+            cache_read_tokens: usage.cache_read_tokens,
+            cache_creation_tokens: usage.cache_creation_tokens,
+            total_cost_usd: usage.cost_usd,
+          });
           break;
         }
         default:
@@ -248,7 +272,7 @@ export class TaskExecutor {
     if (!sawResult && failure === null && resultText === null) {
       failure = "Agent SDK stream ended without a result message";
     }
-    return { resultText, failure };
+    return { resultText, failure, usage };
   }
 
   /**
@@ -547,7 +571,12 @@ export class TaskExecutor {
     }
   }
 
-  private async markRun(runId: string, status: "succeeded" | "failed", errorText: string | null): Promise<void> {
+  private async markRun(
+    runId: string,
+    status: "succeeded" | "failed",
+    errorText: string | null,
+    usage: RunUsage | null,
+  ): Promise<void> {
     try {
       const { error } = await this.supabase
         .from("task_runs")
@@ -555,6 +584,17 @@ export class TaskExecutor {
           status,
           error: errorText ? errorText.slice(0, 4000) : null,
           finished_at: new Date().toISOString(),
+          // Cost columns stay null when the run crashed before a result message.
+          ...(usage
+            ? {
+                model: usage.model,
+                input_tokens: usage.input_tokens,
+                output_tokens: usage.output_tokens,
+                cache_read_tokens: usage.cache_read_tokens,
+                cache_creation_tokens: usage.cache_creation_tokens,
+                cost_usd: usage.cost_usd,
+              }
+            : {}),
         })
         .eq("id", runId);
       if (error) logger.error("executor", `failed to mark run ${runId} ${status}: ${error.message}`);
@@ -664,6 +704,56 @@ function buildSystemPrompt(agent: Agent, task: Task, knowledge: AgentKnowledgeRo
 
 function formatKnowledgeDoc(doc: AgentKnowledgeRow): string {
   return `## ${doc.title}\n${doc.content}`;
+}
+
+/**
+ * Extracts usage totals from an SDK result message (either subtype).
+ * Prefers `modelUsage` (covers subagents/sidechains/internal calls; the
+ * SDK documents it as the correct field for accounting) — summed across
+ * models, with `model` set to the costliest entry's key. Falls back to the
+ * main-loop `usage` + `total_cost_usd` when `modelUsage` is empty.
+ */
+function extractRunUsage(message: SDKResultMessage, fallbackModel: string): RunUsage {
+  const entries = Object.entries(message.modelUsage ?? {});
+  if (entries.length > 0) {
+    const totals: RunUsage = {
+      model: fallbackModel,
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_read_tokens: 0,
+      cache_creation_tokens: 0,
+      cost_usd: 0,
+    };
+    let topCost = -1;
+    for (const [model, modelUsage] of entries) {
+      totals.input_tokens += modelUsage.inputTokens ?? 0;
+      totals.output_tokens += modelUsage.outputTokens ?? 0;
+      totals.cache_read_tokens += modelUsage.cacheReadInputTokens ?? 0;
+      totals.cache_creation_tokens += modelUsage.cacheCreationInputTokens ?? 0;
+      totals.cost_usd += modelUsage.costUSD ?? 0;
+      if ((modelUsage.costUSD ?? 0) > topCost) {
+        topCost = modelUsage.costUSD ?? 0;
+        totals.model = model;
+      }
+    }
+    totals.cost_usd = roundCost(totals.cost_usd);
+    return totals;
+  }
+
+  const usage = message.usage;
+  return {
+    model: fallbackModel,
+    input_tokens: usage?.input_tokens ?? 0,
+    output_tokens: usage?.output_tokens ?? 0,
+    cache_read_tokens: usage?.cache_read_input_tokens ?? 0,
+    cache_creation_tokens: usage?.cache_creation_input_tokens ?? 0,
+    cost_usd: roundCost(message.total_cost_usd ?? 0),
+  };
+}
+
+/** Round to the cost_usd column's numeric(12,6) precision. */
+function roundCost(value: number): number {
+  return Math.round(value * 1e6) / 1e6;
 }
 
 // ------------------------------------------------------- fleet tool helpers

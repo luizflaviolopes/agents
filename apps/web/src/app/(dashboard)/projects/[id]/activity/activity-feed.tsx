@@ -10,6 +10,7 @@ import { formatDuration, timeAgo } from "@/lib/format";
 import { Skeleton } from "@/components/ui/skeleton";
 import { RunStatusBadge } from "@/components/badges";
 import { EmptyState } from "@/components/empty-state";
+import { CostsCard } from "./costs-card";
 
 interface ActivityRun {
   id: string;
@@ -35,6 +36,8 @@ export function ActivityFeed({ projectId }: { projectId: string }) {
 
   return (
     <div className="mx-auto max-w-3xl px-8 py-6">
+      <CostsCard projectId={projectId} />
+
       <p className="mb-5 text-sm text-muted-foreground">
         The latest {runs?.length ?? 0} agent runs across this project.
       </p>

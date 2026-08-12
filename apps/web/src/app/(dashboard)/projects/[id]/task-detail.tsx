@@ -12,7 +12,13 @@ import {
 import type { RunLog, Task, TaskRun } from "@agent-fleet/shared";
 import { api } from "@/lib/api-client";
 import { usePolling } from "@/lib/use-polling";
-import { formatDateTime, formatDuration, timeAgo } from "@/lib/format";
+import {
+  formatCompactNumber,
+  formatDateTime,
+  formatDuration,
+  formatUsdPrecise,
+  timeAgo,
+} from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import {
@@ -233,7 +239,8 @@ function RunItem({ run }: { run: TaskRun }) {
         <span className="text-xs text-muted-foreground">
           {formatDateTime(run.started_at)}
         </span>
-        <span className="ml-auto text-xs text-muted-foreground">
+        <span className="ml-auto min-w-0 truncate text-right text-xs text-muted-foreground">
+          {runUsageSummary(run)}
           {formatDuration(run.started_at, run.finished_at)}
         </span>
       </button>
@@ -261,6 +268,23 @@ function RunItem({ run }: { run: TaskRun }) {
       )}
     </div>
   );
+}
+
+/**
+ * "model · 12.3K in / 1.2K out · $0.0312 · " prefix for the run header —
+ * empty when the run has no usage data (older runs, or a crash before the
+ * SDK result message).
+ */
+function runUsageSummary(run: TaskRun): string {
+  const parts: string[] = [];
+  if (run.model) parts.push(run.model);
+  if (run.input_tokens !== null || run.output_tokens !== null) {
+    parts.push(
+      `${formatCompactNumber(run.input_tokens ?? 0)} in / ${formatCompactNumber(run.output_tokens ?? 0)} out`,
+    );
+  }
+  if (run.cost_usd !== null) parts.push(formatUsdPrecise(run.cost_usd));
+  return parts.length > 0 ? `${parts.join(" · ")} · ` : "";
 }
 
 function LogEntry({ log }: { log: RunLog }) {

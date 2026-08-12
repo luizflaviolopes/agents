@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 import type { Agent, McpServerConfig, Workspace } from "@agent-fleet/shared";
 import { api } from "@/lib/api-client";
+import { formatUsd } from "@/lib/format";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import {
@@ -67,6 +68,37 @@ export function AgentsPanel({
     null,
   );
   const [deleteAgent, setDeleteAgent] = React.useState<Agent | null>(null);
+
+  // 30-day cost/run totals per agent, fetched once from the costs API.
+  const [agentCosts, setAgentCosts] = React.useState<Map<
+    string,
+    { costUsd: number; runs: number }
+  > | null>(null);
+  React.useEffect(() => {
+    let cancelled = false;
+    api<{ byAgent: Array<{ agentId: string | null; costUsd: number; runs: number }> }>(
+      `/api/projects/${projectId}/costs?period=30d`,
+    )
+      .then(({ byAgent }) => {
+        if (cancelled) return;
+        setAgentCosts(
+          new Map(
+            byAgent
+              .filter((row) => row.agentId !== null)
+              .map((row) => [
+                row.agentId as string,
+                { costUsd: row.costUsd, runs: row.runs },
+              ]),
+          ),
+        );
+      })
+      .catch(() => {
+        // Cost summary is decorative — leave it off when the fetch fails.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [projectId]);
 
   const workspaceName = (id: string | null) =>
     workspaces.find((w) => w.id === id)?.name ?? null;
@@ -161,6 +193,14 @@ export function AgentsPanel({
                     {agent.mcp_servers?.length ?? 0} MCP
                   </span>
                 </div>
+                {agentCosts && (
+                  <p className="mt-2 text-xs text-muted-foreground">
+                    30d: {formatUsd(agentCosts.get(agent.id)?.costUsd ?? 0)}
+                    {" · "}
+                    {agentCosts.get(agent.id)?.runs ?? 0} run
+                    {(agentCosts.get(agent.id)?.runs ?? 0) === 1 ? "" : "s"}
+                  </p>
+                )}
                 <div className="mt-4 flex gap-2">
                   <Button
                     variant="outline"

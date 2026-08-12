@@ -40,6 +40,25 @@ export function formatDateTime(iso: string | null): string {
   });
 }
 
+/** Compact count for token totals, e.g. 950, 12.3K, 1.2M. */
+export function formatCompactNumber(value: number): string {
+  return new Intl.NumberFormat("en", {
+    notation: "compact",
+    maximumFractionDigits: 1,
+  }).format(value);
+}
+
+/** USD amount with 2 decimals; tiny non-zero amounts render as "<$0.01". */
+export function formatUsd(value: number): string {
+  if (value > 0 && value < 0.005) return "<$0.01";
+  return `$${value.toFixed(2)}`;
+}
+
+/** USD amount with 4 decimals — for per-run costs. */
+export function formatUsdPrecise(value: number): string {
+  return `$${value.toFixed(4)}`;
+}
+
 /** Slugify a workspace name into a safe folder name. */
 export function slugify(name: string): string {
   return name
