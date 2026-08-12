@@ -1,0 +1,22 @@
+{
+  // Note: moduleResolution "Bundler" (not NodeNext) because @agent-fleet/shared
+  // ships raw TypeScript with extensionless relative imports, which NodeNext
+  // rejects (TS2835). The worker executes through tsx (see ARCHITECTURE.md),
+  // which resolves both styles at runtime.
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "lib": ["ES2022"],
+    "outDir": "dist",
+    "rootDir": "src",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "declaration": false,
+    "sourceMap": true
+  },
+  "include": ["src"]
+}

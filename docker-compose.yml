@@ -1,0 +1,51 @@
+# =============================================================================
+# Agent Fleet — production compose file
+#
+# Two services, both built from this repo:
+#   web    — Next.js UI (port 3000)
+#   worker — task-queue consumer + agent runtime + Telegram bot
+#
+# Supabase (Auth + Postgres + Realtime) is CLOUD-HOSTED — there is no local
+# database service here on purpose.
+#
+# Usage:
+#   cp .env.example .env   # then fill in the values
+#   docker compose up -d --build
+# =============================================================================
+
+services:
+  web:
+    build:
+      context: .
+      dockerfile: infra/web.Dockerfile
+      # NEXT_PUBLIC_* values are baked into the client bundle at build time,
+      # so they must be passed as build args. Compose interpolates ${...}
+      # from the .env file in this directory.
+      args:
+        NEXT_PUBLIC_SUPABASE_URL: ${NEXT_PUBLIC_SUPABASE_URL}
+        NEXT_PUBLIC_SUPABASE_ANON_KEY: ${NEXT_PUBLIC_SUPABASE_ANON_KEY}
+    env_file: .env
+    ports:
+      # If you put a reverse proxy (Caddy/nginx) in front, change this to
+      # "127.0.0.1:3000:3000" so the app is not exposed directly.
+      - "3000:3000"
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: .
+      dockerfile: infra/worker.Dockerfile
+    env_file: .env
+    environment:
+      # Overrides the local-dev value from .env — inside the container the
+      # workspaces live on the named volume below.
+      WORKSPACES_ROOT: /data/workspaces
+    volumes:
+      # Persistent home for cloned workspace repos. Survives rebuilds and
+      # restarts; safe to delete if you accept re-cloning everything
+      # (Supabase, not this volume, is the source of truth).
+      - workspaces-data:/data/workspaces
+    restart: unless-stopped
+
+volumes:
+  workspaces-data:
