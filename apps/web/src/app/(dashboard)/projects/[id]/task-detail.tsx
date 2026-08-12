@@ -3,7 +3,8 @@
 import * as React from "react";
 import { ChevronDown, ChevronRight, CircleSlash, History } from "lucide-react";
 import type { RunLog, Task, TaskRun } from "@agent-fleet/shared";
-import { createClient } from "@/lib/supabase/client";
+import { api } from "@/lib/api-client";
+import { usePolling } from "@/lib/use-polling";
 import { formatDateTime, formatDuration, timeAgo } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -29,79 +30,28 @@ export function TaskDetailDialog({
   task: Task | null;
   agentName: string | null;
   onClose: () => void;
-  onTaskChanged: (task: Task) => void;
+  onTaskChanged: () => void;
 }) {
-  const supabase = React.useMemo(() => createClient(), []);
-  const [runs, setRuns] = React.useState<TaskRun[] | null>(null);
   const [cancelling, setCancelling] = React.useState(false);
-
-  const taskId = task?.id;
-
-  // Load runs when a task is opened, and keep them fresh via Realtime.
-  React.useEffect(() => {
-    if (!taskId) {
-      setRuns(null);
-      return;
-    }
-    let cancelled = false;
-
-    supabase
-      .from("task_runs")
-      .select("*")
-      .eq("task_id", taskId)
-      .order("started_at", { ascending: false })
-      .then(({ data }) => {
-        if (!cancelled) setRuns((data ?? []) as TaskRun[]);
-      });
-
-    const channel = supabase
-      .channel(`task-runs:${taskId}`)
-      .on(
-        "postgres_changes",
-        {
-          event: "*",
-          schema: "public",
-          table: "task_runs",
-          filter: `task_id=eq.${taskId}`,
-        },
-        (payload) => {
-          if (payload.eventType === "INSERT") {
-            const run = payload.new as TaskRun;
-            setRuns((prev) =>
-              prev && !prev.some((r) => r.id === run.id)
-                ? [run, ...prev]
-                : prev,
-            );
-          } else if (payload.eventType === "UPDATE") {
-            const run = payload.new as TaskRun;
-            setRuns(
-              (prev) => prev?.map((r) => (r.id === run.id ? run : r)) ?? prev,
-            );
-          }
-        },
-      )
-      .subscribe();
-
-    return () => {
-      cancelled = true;
-      supabase.removeChannel(channel);
-    };
-  }, [taskId, supabase]);
+  const [cancelError, setCancelError] = React.useState<string | null>(null);
 
   async function cancelTask() {
     if (!task) return;
     setCancelling(true);
-    const { data } = await supabase
-      .from("tasks")
-      .update({ status: "cancelled" })
-      .eq("id", task.id)
-      .eq("status", "queued")
-      .select()
-      .maybeSingle();
-    setCancelling(false);
-    if (data) {
-      onTaskChanged(data as Task);
+    setCancelError(null);
+    try {
+      await api<{ task: Task }>(`/api/tasks/${task.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ status: "cancelled" }),
+      });
+      onTaskChanged();
       onClose();
+    } catch (err) {
+      setCancelError(
+        err instanceof Error ? err.message : "Failed to cancel task",
+      );
+    } finally {
+      setCancelling(false);
     }
   }
 
@@ -148,33 +98,15 @@ export function TaskDetailDialog({
                 </section>
               )}
 
-              <section>
-                <h3 className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                  Runs
-                </h3>
-                {runs === null ? (
-                  <div className="space-y-2">
-                    <Skeleton className="h-10" />
-                    <Skeleton className="h-10" />
-                  </div>
-                ) : runs.length === 0 ? (
-                  <div className="flex items-center gap-2 rounded-lg border border-dashed border-border p-3 text-sm text-muted-foreground">
-                    <History className="size-4" />
-                    No runs yet — a worker will pick this task up from the
-                    queue.
-                  </div>
-                ) : (
-                  <div className="space-y-2">
-                    {runs.map((run) => (
-                      <RunItem key={run.id} run={run} />
-                    ))}
-                  </div>
-                )}
-              </section>
+              {/* Keyed by task id so runs never leak between tasks. */}
+              <TaskRunsSection key={task.id} taskId={task.id} />
             </div>
 
             {task.status === "queued" && (
-              <div className="mt-4 flex justify-end border-t border-border pt-4">
+              <div className="mt-4 flex flex-col items-end gap-2 border-t border-border pt-4">
+                {cancelError && (
+                  <p className="text-sm text-destructive">{cancelError}</p>
+                )}
                 <Button
                   variant="outline"
                   size="sm"
@@ -193,51 +125,80 @@ export function TaskDetailDialog({
   );
 }
 
+function TaskRunsSection({ taskId }: { taskId: string }) {
+  // Poll runs while the dialog is open (replaces the Realtime subscription).
+  const { data: runs, loading } = usePolling<TaskRun[]>(
+    React.useCallback(async () => {
+      const { runs } = await api<{ runs: TaskRun[] }>(
+        `/api/tasks/${taskId}/runs`,
+      );
+      return runs;
+    }, [taskId]),
+    3000,
+    [taskId],
+  );
+
+  return (
+    <section>
+      <h3 className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+        Runs
+      </h3>
+      {loading || !runs ? (
+        <div className="space-y-2">
+          <Skeleton className="h-10" />
+          <Skeleton className="h-10" />
+        </div>
+      ) : runs.length === 0 ? (
+        <div className="flex items-center gap-2 rounded-lg border border-dashed border-border p-3 text-sm text-muted-foreground">
+          <History className="size-4" />
+          No runs yet — a worker will pick this task up from the queue.
+        </div>
+      ) : (
+        <div className="space-y-2">
+          {runs.map((run) => (
+            <RunItem key={run.id} run={run} />
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
 function RunItem({ run }: { run: TaskRun }) {
-  const supabase = React.useMemo(() => createClient(), []);
   const [expanded, setExpanded] = React.useState(false);
-  const [logs, setLogs] = React.useState<RunLog[] | null>(null);
 
-  // Fetch logs when expanded; live-append new log lines while open.
-  React.useEffect(() => {
-    if (!expanded) return;
-    let cancelled = false;
+  // Incremental log fetching: ?after=<seq> only returns new entries. While
+  // the run is finished we fetch once and then stop hitting the network.
+  const logsRef = React.useRef<RunLog[]>([]);
+  const fetchedOnceRef = React.useRef(false);
+  const runStatusRef = React.useRef(run.status);
+  runStatusRef.current = run.status;
 
-    supabase
-      .from("run_logs")
-      .select("*")
-      .eq("run_id", run.id)
-      .order("seq", { ascending: true })
-      .then(({ data }) => {
-        if (!cancelled) setLogs((data ?? []) as RunLog[]);
-      });
-
-    const channel = supabase
-      .channel(`run-logs:${run.id}`)
-      .on(
-        "postgres_changes",
-        {
-          event: "INSERT",
-          schema: "public",
-          table: "run_logs",
-          filter: `run_id=eq.${run.id}`,
-        },
-        (payload) => {
-          const log = payload.new as RunLog;
-          setLogs((prev) => {
-            if (!prev) return [log];
-            if (prev.some((l) => l.id === log.id)) return prev;
-            return [...prev, log].sort((a, b) => a.seq - b.seq);
-          });
-        },
-      )
-      .subscribe();
-
-    return () => {
-      cancelled = true;
-      supabase.removeChannel(channel);
-    };
-  }, [expanded, run.id, supabase]);
+  const { data: logs } = usePolling<RunLog[]>(
+    React.useCallback(async () => {
+      if (fetchedOnceRef.current && runStatusRef.current !== "running") {
+        return logsRef.current;
+      }
+      const lastSeq = logsRef.current[logsRef.current.length - 1]?.seq;
+      const url =
+        lastSeq !== undefined
+          ? `/api/runs/${run.id}/logs?after=${lastSeq}`
+          : `/api/runs/${run.id}/logs`;
+      const { logs: fresh } = await api<{ logs: RunLog[] }>(url);
+      if (fresh.length > 0) {
+        const known = new Set(logsRef.current.map((l) => l.id));
+        logsRef.current = [
+          ...logsRef.current,
+          ...fresh.filter((l) => !known.has(l.id)),
+        ].sort((a, b) => a.seq - b.seq);
+      }
+      fetchedOnceRef.current = true;
+      return logsRef.current;
+    }, [run.id]),
+    2000,
+    [run.id],
+    expanded,
+  );
 
   return (
     <div className="overflow-hidden rounded-lg border border-border">
@@ -266,7 +227,7 @@ function RunItem({ run }: { run: TaskRun }) {
       )}
       {expanded && (
         <div className="max-h-80 space-y-2 overflow-y-auto border-t border-border bg-background/60 p-3">
-          {logs === null ? (
+          {logs === undefined ? (
             <>
               <Skeleton className="h-4 w-3/4" />
               <Skeleton className="h-4 w-1/2" />

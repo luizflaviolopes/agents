@@ -7,7 +7,8 @@ import {
   addWorkspaceRepoSchema,
   createWorkspaceSchema,
 } from "@agent-fleet/shared";
-import { createClient } from "@/lib/supabase/client";
+import { api } from "@/lib/api-client";
+import { usePolling } from "@/lib/use-polling";
 import { repoFolderFromUrl, slugify } from "@/lib/format";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -22,23 +23,31 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Skeleton } from "@/components/ui/skeleton";
 import { CloneStatusBadge } from "@/components/badges";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { EmptyState } from "@/components/empty-state";
 
-export function WorkspacesPanel({
-  projectId,
-  initialWorkspaces,
-  initialRepos,
-}: {
-  projectId: string;
-  initialWorkspaces: Workspace[];
-  initialRepos: WorkspaceRepo[];
-}) {
-  const supabase = React.useMemo(() => createClient(), []);
-  const [workspaces, setWorkspaces] =
-    React.useState<Workspace[]>(initialWorkspaces);
-  const [repos, setRepos] = React.useState<WorkspaceRepo[]>(initialRepos);
+interface WorkspacesPayload {
+  workspaces: Workspace[];
+  repos: WorkspaceRepo[];
+}
+
+export function WorkspacesPanel({ projectId }: { projectId: string }) {
+  // Poll workspaces + repos every 3s — this is how clone-status changes from
+  // the worker reach the UI now (Realtime subscriptions are gone).
+  const { data, loading, refresh } = usePolling<WorkspacesPayload>(
+    React.useCallback(
+      () => api<WorkspacesPayload>(`/api/projects/${projectId}/workspaces`),
+      [projectId],
+    ),
+    3000,
+    [projectId],
+  );
+
+  const workspaces = data?.workspaces ?? [];
+  const repos = data?.repos ?? [];
+
   const [newOpen, setNewOpen] = React.useState(false);
   const [addRepoWorkspace, setAddRepoWorkspace] =
     React.useState<Workspace | null>(null);
@@ -48,59 +57,21 @@ export function WorkspacesPanel({
     null,
   );
 
-  const workspaceIds = React.useRef(new Set(initialWorkspaces.map((w) => w.id)));
-
-  // Live clone-status updates from the worker.
-  React.useEffect(() => {
-    const channel = supabase
-      .channel(`workspace-repos:${projectId}`)
-      .on(
-        "postgres_changes",
-        { event: "*", schema: "public", table: "workspace_repos" },
-        (payload) => {
-          if (payload.eventType === "INSERT") {
-            const repo = payload.new as WorkspaceRepo;
-            if (!workspaceIds.current.has(repo.workspace_id)) return;
-            setRepos((prev) =>
-              prev.some((r) => r.id === repo.id) ? prev : [...prev, repo],
-            );
-          } else if (payload.eventType === "UPDATE") {
-            const repo = payload.new as WorkspaceRepo;
-            setRepos((prev) =>
-              prev.map((r) => (r.id === repo.id ? repo : r)),
-            );
-          } else if (payload.eventType === "DELETE") {
-            const old = payload.old as Partial<WorkspaceRepo>;
-            setRepos((prev) => prev.filter((r) => r.id !== old.id));
-          }
-        },
-      )
-      .subscribe();
-
-    return () => {
-      supabase.removeChannel(channel);
-    };
-  }, [projectId, supabase]);
-
   async function removeWorkspace(ws: Workspace) {
-    const { error } = await supabase
-      .from("workspaces")
-      .delete()
-      .eq("id", ws.id);
-    if (!error) {
-      workspaceIds.current.delete(ws.id);
-      setWorkspaces((prev) => prev.filter((w) => w.id !== ws.id));
-      setRepos((prev) => prev.filter((r) => r.workspace_id !== ws.id));
+    try {
+      await api(`/api/workspaces/${ws.id}`, { method: "DELETE" });
+      refresh();
+    } catch {
+      // Confirm dialog closes either way; the next poll re-syncs the list.
     }
   }
 
   async function removeRepo(repo: WorkspaceRepo) {
-    const { error } = await supabase
-      .from("workspace_repos")
-      .delete()
-      .eq("id", repo.id);
-    if (!error) {
-      setRepos((prev) => prev.filter((r) => r.id !== repo.id));
+    try {
+      await api(`/api/repos/${repo.id}`, { method: "DELETE" });
+      refresh();
+    } catch {
+      // Same as above.
     }
   }
 
@@ -117,7 +88,12 @@ export function WorkspacesPanel({
         </Button>
       </div>
 
-      {workspaces.length === 0 ? (
+      {loading ? (
+        <div className="space-y-4">
+          <Skeleton className="h-32" />
+          <Skeleton className="h-32" />
+        </div>
+      ) : workspaces.length === 0 ? (
         <EmptyState
           icon={FolderGit2}
           title="No workspaces yet"
@@ -215,20 +191,13 @@ export function WorkspacesPanel({
         open={newOpen}
         onOpenChange={setNewOpen}
         projectId={projectId}
-        onCreated={(ws) => {
-          workspaceIds.current.add(ws.id);
-          setWorkspaces((prev) => [...prev, ws]);
-        }}
+        onCreated={refresh}
       />
 
       <AddRepoDialog
         workspace={addRepoWorkspace}
         onClose={() => setAddRepoWorkspace(null)}
-        onAdded={(repo) =>
-          setRepos((prev) =>
-            prev.some((r) => r.id === repo.id) ? prev : [...prev, repo],
-          )
-        }
+        onAdded={refresh}
       />
 
       <ConfirmDialog
@@ -266,7 +235,7 @@ function NewWorkspaceDialog({
   open: boolean;
   onOpenChange: (open: boolean) => void;
   projectId: string;
-  onCreated: (ws: Workspace) => void;
+  onCreated: () => void;
 }) {
   const [name, setName] = React.useState("");
   const [error, setError] = React.useState<string | null>(null);
@@ -292,22 +261,23 @@ function NewWorkspaceDialog({
     }
 
     setBusy(true);
-    const supabase = createClient();
-    const { data, error: insertError } = await supabase
-      .from("workspaces")
-      .insert({
-        project_id: parsed.data.projectId,
-        name: parsed.data.name,
-        path,
-      })
-      .select()
-      .single();
-    setBusy(false);
-    if (insertError || !data) {
-      setError(insertError?.message ?? "Failed to create workspace");
+    try {
+      await api<{ workspace: Workspace }>(
+        `/api/projects/${projectId}/workspaces`,
+        {
+          method: "POST",
+          body: JSON.stringify({ name: parsed.data.name }),
+        },
+      );
+    } catch (err) {
+      setBusy(false);
+      setError(
+        err instanceof Error ? err.message : "Failed to create workspace",
+      );
       return;
     }
-    onCreated(data as Workspace);
+    setBusy(false);
+    onCreated();
     onOpenChange(false);
     setName("");
   }
@@ -366,7 +336,7 @@ function AddRepoDialog({
 }: {
   workspace: Workspace | null;
   onClose: () => void;
-  onAdded: (repo: WorkspaceRepo) => void;
+  onAdded: () => void;
 }) {
   const [url, setUrl] = React.useState("");
   const [branch, setBranch] = React.useState("main");
@@ -402,23 +372,25 @@ function AddRepoDialog({
     }
 
     setBusy(true);
-    const supabase = createClient();
-    const { data, error: insertError } = await supabase
-      .from("workspace_repos")
-      .insert({
-        workspace_id: parsed.data.workspaceId,
-        repo_url: parsed.data.repoUrl,
-        branch: parsed.data.branch,
-        folder_name: parsed.data.folderName,
-      })
-      .select()
-      .single();
-    setBusy(false);
-    if (insertError || !data) {
-      setError(insertError?.message ?? "Failed to add repository");
+    try {
+      await api<{ repo: WorkspaceRepo }>(
+        `/api/workspaces/${workspace.id}/repos`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            repoUrl: parsed.data.repoUrl,
+            branch: parsed.data.branch,
+            folderName: parsed.data.folderName,
+          }),
+        },
+      );
+    } catch (err) {
+      setBusy(false);
+      setError(err instanceof Error ? err.message : "Failed to add repository");
       return;
     }
-    onAdded(data as WorkspaceRepo);
+    setBusy(false);
+    onAdded();
     onClose();
     reset();
   }

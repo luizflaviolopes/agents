@@ -1,9 +1,16 @@
 import { NextResponse } from "next/server";
 import Anthropic from "@anthropic-ai/sdk";
 import { agentBuilderRequestSchema } from "@agent-fleet/shared";
-import { createClient } from "@/lib/supabase/server";
+import {
+  apiHandler,
+  jsonError,
+  parseBody,
+  requireProjectAccess,
+  requireUser,
+} from "@/lib/api/auth";
 
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
 const MODEL_CHOICES = [
   "claude-sonnet-5",
@@ -95,40 +102,17 @@ const PROPOSE_AGENT_TOOL: Anthropic.Messages.Tool = {
   },
 };
 
-export async function POST(request: Request) {
-  const supabase = await createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-  if (!user) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
+export const POST = apiHandler(async (request: Request) => {
+  const user = await requireUser();
 
   if (!process.env.ANTHROPIC_API_KEY) {
-    return NextResponse.json(
-      { error: "ANTHROPIC_API_KEY is not configured on the server." },
-      { status: 500 },
-    );
+    return jsonError(500, "ANTHROPIC_API_KEY is not configured on the server.");
   }
 
-  const body = await request.json().catch(() => null);
-  const parsed = agentBuilderRequestSchema.safeParse(body);
-  if (!parsed.success) {
-    return NextResponse.json(
-      { error: parsed.error.errors[0]?.message ?? "Invalid request" },
-      { status: 400 },
-    );
-  }
+  const parsed = await parseBody(request, agentBuilderRequestSchema);
 
-  // RLS-scoped check that the project belongs to this user.
-  const { data: project } = await supabase
-    .from("projects")
-    .select("id, name")
-    .eq("id", parsed.data.projectId)
-    .maybeSingle();
-  if (!project) {
-    return NextResponse.json({ error: "Project not found" }, { status: 404 });
-  }
+  // Ownership enforced in application code (RLS is gone).
+  await requireProjectAccess(user.id, parsed.projectId);
 
   try {
     const anthropic = new Anthropic({
@@ -144,7 +128,7 @@ export async function POST(request: Request) {
       messages: [
         {
           role: "user",
-          content: `Design an agent for this request:\n\n${parsed.data.idea}`,
+          content: `Design an agent for this request:\n\n${parsed.idea}`,
         },
       ],
     });
@@ -169,4 +153,4 @@ export async function POST(request: Request) {
         : "Agent builder failed unexpectedly.";
     return NextResponse.json({ error: message }, { status: 502 });
   }
-}
+});

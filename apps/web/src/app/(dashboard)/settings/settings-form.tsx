@@ -3,7 +3,7 @@
 import * as React from "react";
 import { Check, MessageCircle, RefreshCw } from "lucide-react";
 import type { Profile } from "@agent-fleet/shared";
-import { createClient } from "@/lib/supabase/client";
+import { api } from "@/lib/api-client";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -16,17 +16,6 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 
-/** Unambiguous alphabet (no 0/O, 1/I) for link codes. */
-const CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-
-function randomLinkCode(): string {
-  const bytes = new Uint8Array(6);
-  crypto.getRandomValues(bytes);
-  return Array.from(bytes)
-    .map((b) => CODE_ALPHABET[b % CODE_ALPHABET.length])
-    .join("");
-}
-
 export function SettingsForm({
   email,
   initialProfile,
@@ -34,7 +23,6 @@ export function SettingsForm({
   email: string;
   initialProfile: Profile | null;
 }) {
-  const supabase = React.useMemo(() => createClient(), []);
   const [displayName, setDisplayName] = React.useState(
     initialProfile?.display_name ?? "",
   );
@@ -55,15 +43,19 @@ export function SettingsForm({
     setSaving(true);
     setProfileError(null);
     setSaved(false);
-    const { error } = await supabase
-      .from("profiles")
-      .update({ display_name: displayName.trim() || null })
-      .eq("id", initialProfile.id);
-    setSaving(false);
-    if (error) {
-      setProfileError(error.message);
+    try {
+      await api<{ profile: Profile }>("/api/profile", {
+        method: "PATCH",
+        body: JSON.stringify({ displayName: displayName.trim() || null }),
+      });
+    } catch (err) {
+      setSaving(false);
+      setProfileError(
+        err instanceof Error ? err.message : "Failed to save profile",
+      );
       return;
     }
+    setSaving(false);
     setSaved(true);
     setTimeout(() => setSaved(false), 2500);
   }
@@ -72,17 +64,20 @@ export function SettingsForm({
     if (!initialProfile) return;
     setGenerating(true);
     setTelegramError(null);
-    const code = randomLinkCode();
-    const { error } = await supabase
-      .from("profiles")
-      .update({ telegram_link_code: code })
-      .eq("id", initialProfile.id);
-    setGenerating(false);
-    if (error) {
-      setTelegramError(error.message);
-      return;
+    try {
+      // The code is generated and stored server-side.
+      const { code } = await api<{ code: string }>(
+        "/api/profile/telegram-code",
+        { method: "POST" },
+      );
+      setLinkCode(code);
+    } catch (err) {
+      setTelegramError(
+        err instanceof Error ? err.message : "Failed to generate a code",
+      );
+    } finally {
+      setGenerating(false);
     }
-    setLinkCode(code);
   }
 
   return (

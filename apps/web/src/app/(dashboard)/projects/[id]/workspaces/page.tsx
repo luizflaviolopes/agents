@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
-import type { Workspace, WorkspaceRepo } from "@agent-fleet/shared";
-import { createClient } from "@/lib/supabase/server";
+import { notFound, redirect } from "next/navigation";
+import { getOwnedProject, getSessionUser } from "@/lib/api/page-data";
 import { WorkspacesPanel } from "./workspaces-panel";
 
 export const metadata: Metadata = { title: "Workspaces" };
@@ -11,28 +11,11 @@ export default async function WorkspacesPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;
-  const supabase = await createClient();
+  const user = await getSessionUser();
+  if (!user) redirect("/login");
+  const project = await getOwnedProject(user.id, id);
+  if (!project) notFound();
 
-  const { data: workspaces } = await supabase
-    .from("workspaces")
-    .select("*")
-    .eq("project_id", id)
-    .order("created_at", { ascending: true });
-
-  const workspaceIds = (workspaces ?? []).map((w: Workspace) => w.id);
-  const { data: repos } = workspaceIds.length
-    ? await supabase
-        .from("workspace_repos")
-        .select("*")
-        .in("workspace_id", workspaceIds)
-        .order("created_at", { ascending: true })
-    : { data: [] as WorkspaceRepo[] };
-
-  return (
-    <WorkspacesPanel
-      projectId={id}
-      initialWorkspaces={(workspaces ?? []) as Workspace[]}
-      initialRepos={(repos ?? []) as WorkspaceRepo[]}
-    />
-  );
+  // Workspaces + repo clone statuses are polled by the panel (every 3s).
+  return <WorkspacesPanel projectId={id} />;
 }

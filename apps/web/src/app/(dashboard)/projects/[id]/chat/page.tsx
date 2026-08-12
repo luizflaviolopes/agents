@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
-import type { Message } from "@agent-fleet/shared";
-import { createClient } from "@/lib/supabase/server";
+import { notFound, redirect } from "next/navigation";
+import { getOwnedProject, getSessionUser } from "@/lib/api/page-data";
 import { ChatPanel } from "./chat-panel";
 
 export const metadata: Metadata = { title: "Chat" };
@@ -11,16 +11,11 @@ export default async function ChatPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;
-  const supabase = await createClient();
+  const user = await getSessionUser();
+  if (!user) redirect("/login");
+  const project = await getOwnedProject(user.id, id);
+  if (!project) notFound();
 
-  const { data: messages } = await supabase
-    .from("messages")
-    .select("*")
-    .eq("project_id", id)
-    .order("created_at", { ascending: true })
-    .limit(300);
-
-  return (
-    <ChatPanel projectId={id} initialMessages={(messages ?? []) as Message[]} />
-  );
+  // Messages are loaded (and kept fresh) by the panel's 2.5s poll.
+  return <ChatPanel projectId={id} />;
 }

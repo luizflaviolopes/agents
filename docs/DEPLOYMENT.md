@@ -6,9 +6,9 @@ a comfortable starting point; the worker's memory use scales with how many
 agents run concurrently and how big the cloned repos are.
 
 Prerequisite: you have already created the Supabase project and applied
-`supabase/migrations/0001_init.sql` (see the [README](../README.md#setup) —
-steps 1–4). Supabase is cloud-hosted; nothing database-related runs on the
-VPS.
+**both** migrations in `supabase/migrations/` (`0001_init.sql` and
+`0002_backend_authz.sql` — see the [README](../README.md#setup), steps 1–4).
+Supabase is cloud-hosted; nothing database-related runs on the VPS.
 
 ## 1. Install Docker
 
@@ -149,10 +149,13 @@ publishes no ports at all.)
 
 ## Security reminders
 
-- The `service_role` key in `.env` bypasses RLS — the VPS is exactly as
-  sensitive as your database. Restrict SSH (keys only), keep the system
-  patched (`unattended-upgrades`), and don't run untrusted workloads next to
-  the worker.
+- The `service_role` key in `.env` has full database access — the VPS is
+  exactly as sensitive as your database. Both containers use it at runtime:
+  the **web** container for its API routes (all data access is authorized in
+  the backend; RLS is disabled) and the **worker** for the queue and agent
+  runtime. Restrict SSH (keys only), keep the system patched
+  (`unattended-upgrades`), and don't run untrusted workloads next to the
+  worker.
 - Agents inside the worker container run with bypassed permission prompts.
   Treat the box as a trusted execution environment; a later hardening step is
   restricting the worker's outbound traffic to Anthropic, Supabase, GitHub,

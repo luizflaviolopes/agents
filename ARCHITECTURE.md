@@ -46,10 +46,27 @@ unions live in `packages/shared/src/db-types.ts`. Keep both in sync.
 
 ### Security
 
-RLS is enabled on every table. The browser (anon key) can only reach rows
-whose parent project is owned by `auth.uid()` (enforced with `exists`
-subqueries up the chain: run_logs → task_runs → tasks → projects, etc.).
-The worker uses `SUPABASE_SERVICE_ROLE_KEY`, which bypasses RLS.
+Authorization lives in the **backend**, not in the database. Migration
+`supabase/migrations/0002_backend_authz.sql` disabled RLS, dropped all
+policies, and revoked every privilege on public tables/functions from the
+`anon` and `authenticated` roles — so the anon key cannot read or write any
+table (PostgREST and Realtime `postgres_changes` return nothing for it).
+
+- **Browser Supabase client = auth only.** The `anon` key is used solely for
+  signup, login, session refresh, and sign-out. All data access from the
+  browser goes through the web app's `/api/*` route handlers.
+- **Web server uses the service-role key.** API routes and server components
+  read/write through a service-role client
+  (`apps/web/src/lib/supabase/admin.ts`, guarded by `server-only`) and
+  enforce ownership in application code: `requireUser()` reads the session
+  from cookies, and `requireProjectAccess()` (plus workspace/repo/agent/task/
+  run variants in `apps/web/src/lib/api/auth.ts`) walks every row up to its
+  project and checks `projects.owner_id`.
+- **The worker keeps using `SUPABASE_SERVICE_ROLE_KEY`** exactly as before
+  (its Realtime subscriptions still work — service role is unaffected by the
+  revokes).
+- The web UI no longer subscribes to Realtime; it **polls** the API routes
+  (see "Task queue" below).
 
 ## Monorepo layout
 
@@ -89,8 +106,14 @@ agent-fleet/
    (`finished_at`, `result`).
 
 Realtime publication (`supabase_realtime`) includes: `tasks`, `task_runs`,
-`run_logs`, `messages`, `agents`, `workspace_repos` — the web UI live-updates
-task boards, log streams, and chat from these.
+`run_logs`, `messages`, `agents`, `workspace_repos` — only the **worker**
+(service role) consumes it now, as a wake-up hint. The web UI **polls** its
+own API routes instead: board tasks every 3s, chat messages every 2.5s
+(incremental via `?after=<iso>`), repo clone statuses every 3s, activity
+every 10s, and run logs every 2s (incremental via `?after=<seq>`, only while
+the task dialog is open and the run is running) — all via the
+`usePolling` hook in `apps/web/src/lib/use-polling.ts`, which pauses while
+the tab is hidden.
 
 ## Workspaces on disk
 
@@ -130,15 +153,24 @@ debugging record for everything an agent does.
    `parent_task_id` set for subtasks) assigned to specialist agents.
 3. Workers claim and execute those tasks through the normal queue.
 4. Manager replies are stored in `messages` (`sender = 'manager'`) and
-   delivered over the originating channel (web via Realtime, Telegram via
-   `TELEGRAM_BOT_TOKEN`).
+   delivered over the originating channel (web via the chat panel's message
+   polling, Telegram via `TELEGRAM_BOT_TOKEN`).
 
 ## API contracts
+
+All web data access goes through route handlers under
+`apps/web/src/app/api/`: `projects` (+`[id]`, and nested `workspaces`,
+`agents`, `tasks`, `messages`, `activity`), `workspaces/[wsId]` (+`repos`),
+`repos/[repoId]`, `agents/[agentId]`, `tasks/[taskId]` (+`runs`),
+`runs/[runId]/logs`, `profile` (+`telegram-code`), and `agent-builder`.
+Every route calls `requireUser()` and the relevant ownership check before
+touching the database with the admin client.
 
 Payload validation lives in `packages/shared/src/schemas.ts` (zod):
 `createProjectSchema`, `createWorkspaceSchema`, `addWorkspaceRepoSchema`,
 `createAgentSchema`, `createTaskSchema`, `sendMessageSchema`,
-`agentBuilderRequestSchema`. API routes accept camelCase payloads and map to
+`agentBuilderRequestSchema` (update payloads are validated by local zod
+schemas in the route files). API routes accept camelCase payloads and map to
 snake_case columns. Constants: `DEFAULT_MODEL`, `TASK_STATUSES`,
 `AGENT_ROLES` in `packages/shared/src/constants.ts`.
 
@@ -146,3 +178,6 @@ snake_case columns. Constants: `DEFAULT_MODEL`, `TASK_STATUSES`,
 
 See `.env.example`: Supabase URL/keys, `ANTHROPIC_API_KEY`,
 `TELEGRAM_BOT_TOKEN`, `GITHUB_TOKEN`, `WORKSPACES_ROOT`, `WEB_URL`.
+`SUPABASE_SERVICE_ROLE_KEY` is required by **both** the web server (API
+routes / server components) and the worker — it must never reach the
+browser.

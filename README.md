@@ -37,9 +37,9 @@ flowchart LR
     GitHub[GitHub]
 
     Browser --> Web
+    Browser -- anon key: auth only --> Auth
     TG <--> Worker
-    Web -- anon key + RLS --> PG
-    Web -- live updates --> RT
+    Web -- service role key + backend authz --> PG
     Worker -- service role key --> PG
     Worker -- wake-up hints --> RT
     Worker -- Claude Agent SDK --> Anthropic
@@ -53,8 +53,9 @@ the Telegram bot, or a manager agent). The worker claims it atomically via the
 records a `task_runs` row, executes the agent with the Claude Agent SDK
 (cwd set to the agent's workspace when it has one), streams every SDK event
 into `run_logs`, and finally marks the task `done` or `failed` with its
-`result`. The web UI live-updates task boards, chat, and log streams over
-Supabase Realtime.
+`result`. The web UI keeps task boards, chat, and log streams fresh by
+polling its own API routes (Realtime is only used by the worker, as a
+wake-up hint).
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the full domain model, and
 [docs/CREATING-AGENTS.md](docs/CREATING-AGENTS.md) for how to write good
@@ -92,11 +93,17 @@ agent-fleet/
 Create a new project at [supabase.com](https://supabase.com). Any region,
 any plan.
 
-### 2. Apply the database migration
+### 2. Apply the database migrations
 
-Everything lives in a single migration, `supabase/migrations/0001_init.sql`
-(tables, RLS policies, the `claim_next_task` RPC, triggers, Realtime
-publication). Apply it one of two ways:
+There are two migrations in `supabase/migrations/` — apply **both**, in
+order:
+
+- `0001_init.sql` — tables, the `claim_next_task` RPC, triggers, Realtime
+  publication.
+- `0002_backend_authz.sql` — moves authorization to the backend: disables
+  RLS, drops all policies, and revokes all table/function privileges from
+  the `anon`/`authenticated` roles (the browser can no longer query the
+  database directly; all data access goes through the web app's API routes).
 
 **Option A — Supabase CLI (recommended):**
 
@@ -107,8 +114,8 @@ npx supabase db push
 ```
 
 **Option B — SQL editor:** open your project's *SQL Editor* in the Supabase
-dashboard, paste the entire contents of `supabase/migrations/0001_init.sql`,
-and run it.
+dashboard, paste the contents of `supabase/migrations/0001_init.sql`, run
+it, then do the same with `supabase/migrations/0002_backend_authz.sql`.
 
 ### 3. Get your Supabase keys
 
@@ -117,8 +124,8 @@ In the Supabase dashboard: **Settings → API**. You need three values:
 | Value | Goes into |
 |---|---|
 | Project URL | `NEXT_PUBLIC_SUPABASE_URL` |
-| `anon` / public key | `NEXT_PUBLIC_SUPABASE_ANON_KEY` |
-| `service_role` key | `SUPABASE_SERVICE_ROLE_KEY` (worker only — never in the browser) |
+| `anon` / public key | `NEXT_PUBLIC_SUPABASE_ANON_KEY` (browser — auth only) |
+| `service_role` key | `SUPABASE_SERVICE_ROLE_KEY` (web server + worker — never in the browser) |
 
 ### 4. (Optional) Create a Telegram bot
 
@@ -174,10 +181,16 @@ install, updates, logs, backups, HTTPS reverse proxy).
 
 ## Security notes
 
-- **Key separation.** The browser only ever gets the `anon` key, and RLS
-  restricts every table to rows owned by the signed-in user. The
-  `service_role` key (bypasses RLS) is used **only by the worker** — keep it
-  out of anything client-side and out of git.
+- **Backend authorization, not RLS.** Migration `0002_backend_authz.sql`
+  disabled RLS and revoked all table access from the `anon`/`authenticated`
+  roles. The browser's `anon` key is used **only for auth** (signup, login,
+  session, sign-out) — it cannot read or write any table. All data access
+  goes through the web app's API routes, which authenticate the session
+  cookie and enforce `projects.owner_id` ownership in application code.
+- **Key separation.** The `service_role` key is used by the **web app's
+  server** (API routes / server components) and the **worker** — keep it out
+  of anything client-side and out of git. It is never sent to the browser
+  (the web admin client is guarded with the `server-only` package).
 - **Agents run with bypassed permissions.** Inside the worker container,
   Claude Agent SDK sessions run without interactive permission prompts — an
   agent can run shell commands, edit files, and hit the network from inside

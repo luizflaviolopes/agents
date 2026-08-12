@@ -12,7 +12,7 @@ import {
   Trash2,
 } from "lucide-react";
 import type { Agent, McpServerConfig, Workspace } from "@agent-fleet/shared";
-import { createClient } from "@/lib/supabase/client";
+import { api } from "@/lib/api-client";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import {
@@ -58,7 +58,6 @@ export function AgentsPanel({
   initialAgents: Agent[];
   workspaces: Workspace[];
 }) {
-  const supabase = React.useMemo(() => createClient(), []);
   const [agents, setAgents] = React.useState<Agent[]>(initialAgents);
   const [createOpen, setCreateOpen] = React.useState(false);
   const [editAgent, setEditAgent] = React.useState<Agent | null>(null);
@@ -71,11 +70,12 @@ export function AgentsPanel({
     setAgents((prev) =>
       prev.map((a) => (a.id === agent.id ? { ...a, is_active: active } : a)),
     );
-    const { error } = await supabase
-      .from("agents")
-      .update({ is_active: active })
-      .eq("id", agent.id);
-    if (error) {
+    try {
+      await api<{ agent: Agent }>(`/api/agents/${agent.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ isActive: active }),
+      });
+    } catch {
       // revert on failure
       setAgents((prev) =>
         prev.map((a) => (a.id === agent.id ? { ...a, is_active: !active } : a)),
@@ -84,9 +84,11 @@ export function AgentsPanel({
   }
 
   async function removeAgent(agent: Agent) {
-    const { error } = await supabase.from("agents").delete().eq("id", agent.id);
-    if (!error) {
+    try {
+      await api(`/api/agents/${agent.id}`, { method: "DELETE" });
       setAgents((prev) => prev.filter((a) => a.id !== agent.id));
+    } catch {
+      // keep the agent in the list if the server refused the delete
     }
   }
 
@@ -290,29 +292,32 @@ function CreateAgentDialog({
       return;
     }
     setBusy(true);
-    const supabase = createClient();
-    const { data, error: insertError } = await supabase
-      .from("agents")
-      .insert({
-        project_id: projectId,
-        workspace_id: form.workspaceId || null,
-        name: form.name.trim(),
-        role: "specialist",
-        instructions: form.instructions,
-        model: form.model,
-        plugins: form.plugins,
-        mcp_servers: form.mcpServers
-          .filter((row) => row.name.trim())
-          .map(rowToMcpConfig),
-      })
-      .select()
-      .single();
-    setBusy(false);
-    if (insertError || !data) {
-      setError(insertError?.message ?? "Failed to create agent");
+    let created: Agent;
+    try {
+      const { agent } = await api<{ agent: Agent }>(
+        `/api/projects/${projectId}/agents`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            name: form.name.trim(),
+            workspaceId: form.workspaceId || null,
+            instructions: form.instructions,
+            model: form.model,
+            plugins: form.plugins,
+            mcpServers: form.mcpServers
+              .filter((row) => row.name.trim())
+              .map(rowToMcpConfig),
+          }),
+        },
+      );
+      created = agent;
+    } catch (err) {
+      setBusy(false);
+      setError(err instanceof Error ? err.message : "Failed to create agent");
       return;
     }
-    onCreated(data as Agent);
+    setBusy(false);
+    onCreated(created);
     onOpenChange(false);
     reset();
   }
@@ -484,28 +489,32 @@ function EditAgentDialog({
     }
     setBusy(true);
     setError(null);
-    const supabase = createClient();
-    const { data, error: updateError } = await supabase
-      .from("agents")
-      .update({
-        name: form.name.trim(),
-        instructions: form.instructions,
-        model: form.model,
-        workspace_id: form.workspaceId || null,
-        plugins: form.plugins,
-        mcp_servers: form.mcpServers
-          .filter((row) => row.name.trim())
-          .map(rowToMcpConfig),
-      })
-      .eq("id", agent.id)
-      .select()
-      .single();
-    setBusy(false);
-    if (updateError || !data) {
-      setError(updateError?.message ?? "Failed to save agent");
+    let saved: Agent;
+    try {
+      const { agent: updated } = await api<{ agent: Agent }>(
+        `/api/agents/${agent.id}`,
+        {
+          method: "PATCH",
+          body: JSON.stringify({
+            name: form.name.trim(),
+            instructions: form.instructions,
+            model: form.model,
+            workspaceId: form.workspaceId || null,
+            plugins: form.plugins,
+            mcpServers: form.mcpServers
+              .filter((row) => row.name.trim())
+              .map(rowToMcpConfig),
+          }),
+        },
+      );
+      saved = updated;
+    } catch (err) {
+      setBusy(false);
+      setError(err instanceof Error ? err.message : "Failed to save agent");
       return;
     }
-    onSaved(data as Agent);
+    setBusy(false);
+    onSaved(saved);
     onClose();
   }
 

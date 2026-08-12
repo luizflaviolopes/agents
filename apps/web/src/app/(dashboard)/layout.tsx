@@ -1,6 +1,7 @@
 import { redirect } from "next/navigation";
 import type { Profile, Project } from "@agent-fleet/shared";
-import { createClient } from "@/lib/supabase/server";
+import { getSessionUser } from "@/lib/api/page-data";
+import { getAdminClient } from "@/lib/supabase/admin";
 import { Sidebar } from "@/components/sidebar";
 
 export default async function DashboardLayout({
@@ -8,19 +9,17 @@ export default async function DashboardLayout({
 }: {
   children: React.ReactNode;
 }) {
-  const supabase = await createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-
+  const user = await getSessionUser();
   if (!user) redirect("/login");
 
+  const admin = getAdminClient();
   const [{ data: projects }, { data: profile }] = await Promise.all([
-    supabase
+    admin
       .from("projects")
       .select("*")
+      .eq("owner_id", user.id)
       .order("created_at", { ascending: false }),
-    supabase.from("profiles").select("*").eq("id", user.id).maybeSingle(),
+    admin.from("profiles").select("*").eq("id", user.id).maybeSingle(),
   ]);
 
   return (

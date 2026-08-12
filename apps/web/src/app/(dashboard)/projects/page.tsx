@@ -1,6 +1,8 @@
 import type { Metadata } from "next";
+import { redirect } from "next/navigation";
 import type { Project } from "@agent-fleet/shared";
-import { createClient } from "@/lib/supabase/server";
+import { getSessionUser } from "@/lib/api/page-data";
+import { getAdminClient } from "@/lib/supabase/admin";
 import { ProjectsGrid } from "./projects-grid";
 
 export const metadata: Metadata = { title: "Projects" };
@@ -11,10 +13,14 @@ export default async function ProjectsPage({
   searchParams: Promise<{ new?: string }>;
 }) {
   const { new: openNew } = await searchParams;
-  const supabase = await createClient();
-  const { data: projects } = await supabase
+  const user = await getSessionUser();
+  if (!user) redirect("/login");
+
+  const admin = getAdminClient();
+  const { data: projects } = await admin
     .from("projects")
     .select("*")
+    .eq("owner_id", user.id)
     .order("created_at", { ascending: false });
 
   return (

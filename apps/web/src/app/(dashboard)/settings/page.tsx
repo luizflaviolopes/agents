@@ -1,19 +1,18 @@
 import type { Metadata } from "next";
 import { redirect } from "next/navigation";
 import type { Profile } from "@agent-fleet/shared";
-import { createClient } from "@/lib/supabase/server";
+import { getSessionUser } from "@/lib/api/page-data";
+import { getAdminClient } from "@/lib/supabase/admin";
 import { SettingsForm } from "./settings-form";
 
 export const metadata: Metadata = { title: "Settings" };
 
 export default async function SettingsPage() {
-  const supabase = await createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
+  const user = await getSessionUser();
   if (!user) redirect("/login");
 
-  const { data: profile } = await supabase
+  const admin = getAdminClient();
+  const { data: profile } = await admin
     .from("profiles")
     .select("*")
     .eq("id", user.id)

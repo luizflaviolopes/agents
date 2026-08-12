@@ -24,6 +24,9 @@ services:
       args:
         NEXT_PUBLIC_SUPABASE_URL: ${NEXT_PUBLIC_SUPABASE_URL}
         NEXT_PUBLIC_SUPABASE_ANON_KEY: ${NEXT_PUBLIC_SUPABASE_ANON_KEY}
+    # env_file supplies the RUNTIME environment — the web server needs
+    # SUPABASE_SERVICE_ROLE_KEY at runtime (its API routes do all data access
+    # with the service-role key; the browser's anon key is auth-only).
     env_file: .env
     ports:
       # If you put a reverse proxy (Caddy/nginx) in front, change this to

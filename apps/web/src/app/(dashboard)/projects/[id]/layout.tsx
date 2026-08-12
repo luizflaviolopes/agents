@@ -1,6 +1,5 @@
-import { notFound } from "next/navigation";
-import type { Project } from "@agent-fleet/shared";
-import { createClient } from "@/lib/supabase/server";
+import { notFound, redirect } from "next/navigation";
+import { getOwnedProject, getSessionUser } from "@/lib/api/page-data";
 import { TabNav } from "./tab-nav";
 
 export default async function ProjectLayout({
@@ -11,29 +10,26 @@ export default async function ProjectLayout({
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;
-  const supabase = await createClient();
-  const { data: project } = await supabase
-    .from("projects")
-    .select("*")
-    .eq("id", id)
-    .maybeSingle();
+  const user = await getSessionUser();
+  if (!user) redirect("/login");
 
+  const project = await getOwnedProject(user.id, id);
   if (!project) notFound();
-
-  const p = project as Project;
 
   return (
     <div className="flex h-screen flex-col">
       <header className="shrink-0 border-b border-border px-8 pt-6">
         <div className="flex items-baseline gap-3">
-          <h1 className="text-xl font-semibold tracking-tight">{p.name}</h1>
-          {p.description && (
+          <h1 className="text-xl font-semibold tracking-tight">
+            {project.name}
+          </h1>
+          {project.description && (
             <p className="truncate text-sm text-muted-foreground">
-              {p.description}
+              {project.description}
             </p>
           )}
         </div>
-        <TabNav projectId={p.id} />
+        <TabNav projectId={project.id} />
       </header>
       <div className="min-h-0 flex-1 overflow-y-auto">{children}</div>
     </div>

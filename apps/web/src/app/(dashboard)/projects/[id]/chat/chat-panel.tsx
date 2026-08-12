@@ -4,56 +4,60 @@ import * as React from "react";
 import { MessageSquare, SendHorizonal } from "lucide-react";
 import type { Message } from "@agent-fleet/shared";
 import { sendMessageSchema } from "@agent-fleet/shared";
-import { createClient } from "@/lib/supabase/client";
+import { api } from "@/lib/api-client";
+import { usePolling } from "@/lib/use-polling";
 import { formatDateTime } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
+import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
 import { EmptyState } from "@/components/empty-state";
 
-export function ChatPanel({
-  projectId,
-  initialMessages,
-}: {
-  projectId: string;
-  initialMessages: Message[];
-}) {
-  const supabase = React.useMemo(() => createClient(), []);
-  const [messages, setMessages] = React.useState<Message[]>(initialMessages);
+export function ChatPanel({ projectId }: { projectId: string }) {
+  // Accumulated messages; the poll fetches incrementally via ?after=<iso>
+  // and merges (dedup by id) — manager replies arrive this way now that the
+  // Realtime subscription is gone.
+  const messagesRef = React.useRef<Message[]>([]);
+
+  const mergeMessages = React.useCallback((incoming: Message[]): Message[] => {
+    if (incoming.length > 0) {
+      const known = new Set(messagesRef.current.map((m) => m.id));
+      const fresh = incoming.filter((m) => !known.has(m.id));
+      if (fresh.length > 0) {
+        messagesRef.current = [...messagesRef.current, ...fresh].sort((a, b) =>
+          (a.created_at ?? "").localeCompare(b.created_at ?? ""),
+        );
+      }
+    }
+    return messagesRef.current;
+  }, []);
+
+  const {
+    data: messages,
+    loading,
+    refresh,
+  } = usePolling<Message[]>(
+    React.useCallback(async () => {
+      const last = messagesRef.current[messagesRef.current.length - 1];
+      const url = last
+        ? `/api/projects/${projectId}/messages?after=${encodeURIComponent(last.created_at)}`
+        : `/api/projects/${projectId}/messages`;
+      const { messages } = await api<{ messages: Message[] }>(url);
+      return mergeMessages(messages);
+    }, [projectId, mergeMessages]),
+    2500,
+    [projectId],
+  );
+
   const [draft, setDraft] = React.useState("");
   const [error, setError] = React.useState<string | null>(null);
   const [sending, setSending] = React.useState(false);
   const bottomRef = React.useRef<HTMLDivElement>(null);
 
-  // Manager replies arrive asynchronously via Realtime.
-  React.useEffect(() => {
-    const channel = supabase
-      .channel(`chat:${projectId}`)
-      .on(
-        "postgres_changes",
-        {
-          event: "INSERT",
-          schema: "public",
-          table: "messages",
-          filter: `project_id=eq.${projectId}`,
-        },
-        (payload) => {
-          const message = payload.new as Message;
-          setMessages((prev) =>
-            prev.some((m) => m.id === message.id) ? prev : [...prev, message],
-          );
-        },
-      )
-      .subscribe();
-
-    return () => {
-      supabase.removeChannel(channel);
-    };
-  }, [projectId, supabase]);
-
+  const messageCount = messages?.length ?? 0;
   React.useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages.length]);
+  }, [messageCount]);
 
   async function send() {
     setError(null);
@@ -65,28 +69,22 @@ export function ChatPanel({
     if (!parsed.success) return;
 
     setSending(true);
-    const { data, error: insertError } = await supabase
-      .from("messages")
-      .insert({
-        project_id: parsed.data.projectId,
-        sender: "user",
-        channel: parsed.data.channel,
-        content: parsed.data.content,
-      })
-      .select()
-      .single();
-
-    setSending(false);
-    if (insertError || !data) {
-      setError(insertError?.message ?? "Failed to send message");
-      return;
+    try {
+      const { message } = await api<{ message: Message }>(
+        `/api/projects/${projectId}/messages`,
+        {
+          method: "POST",
+          body: JSON.stringify({ content: parsed.data.content }),
+        },
+      );
+      mergeMessages([message]);
+      refresh(); // re-render with the merged list immediately
+      setDraft("");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to send message");
+    } finally {
+      setSending(false);
     }
-
-    const message = data as Message;
-    setMessages((prev) =>
-      prev.some((m) => m.id === message.id) ? prev : [...prev, message],
-    );
-    setDraft("");
   }
 
   function onKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
@@ -99,7 +97,13 @@ export function ChatPanel({
   return (
     <div className="mx-auto flex h-full max-w-3xl flex-col px-6">
       <div className="flex-1 space-y-4 overflow-y-auto py-6">
-        {messages.length === 0 ? (
+        {loading ? (
+          <div className="space-y-3 pt-6">
+            <Skeleton className="h-12 w-2/3" />
+            <Skeleton className="ml-auto h-12 w-2/3" />
+            <Skeleton className="h-12 w-1/2" />
+          </div>
+        ) : messageCount === 0 ? (
           <EmptyState
             icon={MessageSquare}
             title="Talk to your manager"
@@ -107,7 +111,7 @@ export function ChatPanel({
             className="mt-10 border-none"
           />
         ) : (
-          messages.map((message) => (
+          (messages ?? []).map((message) => (
             <div
               key={message.id}
               className={cn(

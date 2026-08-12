@@ -6,8 +6,7 @@ import { useRouter } from "next/navigation";
 import { FolderKanban, Plus } from "lucide-react";
 import type { Project } from "@agent-fleet/shared";
 import { createProjectSchema } from "@agent-fleet/shared";
-import { createClient } from "@/lib/supabase/client";
-import { defaultManagerInstructions } from "@/lib/manager";
+import { api } from "@/lib/api-client";
 import { timeAgo } from "@/lib/format";
 import { Button } from "@/components/ui/button";
 import {
@@ -59,52 +58,28 @@ export function ProjectsGrid({
     }
 
     setBusy(true);
-    const supabase = createClient();
-    const {
-      data: { user },
-    } = await supabase.auth.getUser();
-    if (!user) {
-      setError("Not signed in");
+    let project: Project;
+    try {
+      // The API creates the project AND its manager agent server-side.
+      const created = await api<{ project: Project }>("/api/projects", {
+        method: "POST",
+        body: JSON.stringify(parsed.data),
+      });
+      project = created.project;
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : "Failed to create project",
+      );
       setBusy(false);
       return;
     }
 
-    const { data: project, error: projectError } = await supabase
-      .from("projects")
-      .insert({
-        owner_id: user.id,
-        name: parsed.data.name,
-        description: parsed.data.description ?? null,
-      })
-      .select()
-      .single();
-
-    if (projectError || !project) {
-      setError(projectError?.message ?? "Failed to create project");
-      setBusy(false);
-      return;
-    }
-
-    // Every project gets a manager agent that routes work to specialists.
-    const { error: agentError } = await supabase.from("agents").insert({
-      project_id: project.id,
-      name: "Manager",
-      role: "manager",
-      instructions: defaultManagerInstructions(parsed.data.name),
-    });
-
-    if (agentError) {
-      setError(`Project created, but manager agent failed: ${agentError.message}`);
-      setBusy(false);
-      return;
-    }
-
-    setProjects((prev) => [project as Project, ...prev]);
+    setProjects((prev) => [project, ...prev]);
     setOpen(false);
     setName("");
     setDescription("");
     setBusy(false);
-    router.push(`/projects/${(project as Project).id}`);
+    router.push(`/projects/${project.id}`);
     router.refresh();
   }
 

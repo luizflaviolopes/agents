@@ -4,7 +4,8 @@ import * as React from "react";
 import { ArrowUp, ListTodo, Plus } from "lucide-react";
 import type { Agent, Task, TaskStatus } from "@agent-fleet/shared";
 import { createTaskSchema } from "@agent-fleet/shared";
-import { createClient } from "@/lib/supabase/client";
+import { api } from "@/lib/api-client";
+import { usePolling } from "@/lib/use-polling";
 import { timeAgo } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -19,6 +20,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select } from "@/components/ui/select";
+import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
 import { SourceBadge } from "@/components/badges";
 import { EmptyState } from "@/components/empty-state";
@@ -34,17 +36,29 @@ const COLUMNS: { status: TaskStatus; label: string; dot: string }[] = [
 
 export function Board({
   projectId,
-  initialTasks,
   agents,
   initialTaskId,
 }: {
   projectId: string;
-  initialTasks: Task[];
   agents: Agent[];
   initialTaskId?: string;
 }) {
-  const supabase = React.useMemo(() => createClient(), []);
-  const [tasks, setTasks] = React.useState<Task[]>(initialTasks);
+  // Poll the queue every 3s (replaces the old Realtime subscription).
+  const {
+    data: tasks,
+    loading,
+    refresh,
+  } = usePolling<Task[]>(
+    React.useCallback(async () => {
+      const { tasks } = await api<{ tasks: Task[] }>(
+        `/api/projects/${projectId}/tasks`,
+      );
+      return tasks;
+    }, [projectId]),
+    3000,
+    [projectId],
+  );
+
   const [selectedTask, setSelectedTask] = React.useState<Task | null>(null);
   const [newTaskOpen, setNewTaskOpen] = React.useState(false);
 
@@ -54,68 +68,38 @@ export function Board({
     [agents],
   );
 
-  // Open the task referenced by ?task=… (deep link from the Activity feed).
+  // Keep the open dialog's task in sync with the freshest polled copy.
   React.useEffect(() => {
-    if (!initialTaskId) return;
-    const known = initialTasks.find((t) => t.id === initialTaskId);
+    if (!tasks) return;
+    setSelectedTask((sel) => {
+      if (!sel) return sel;
+      return tasks.find((t) => t.id === sel.id) ?? sel;
+    });
+  }, [tasks]);
+
+  // Open the task referenced by ?task=… (deep link from the Activity feed).
+  const deepLinkDone = React.useRef(false);
+  React.useEffect(() => {
+    if (!initialTaskId || !tasks || deepLinkDone.current) return;
+    deepLinkDone.current = true;
+    const known = tasks.find((t) => t.id === initialTaskId);
     if (known) {
       setSelectedTask(known);
       return;
     }
-    supabase
-      .from("tasks")
-      .select("*")
-      .eq("id", initialTaskId)
-      .maybeSingle()
-      .then(({ data }) => {
-        if (data) setSelectedTask(data as Task);
-      });
-  }, [initialTaskId, initialTasks, supabase]);
+    api<{ task: Task }>(`/api/tasks/${initialTaskId}`)
+      .then(({ task }) => setSelectedTask(task))
+      .catch(() => undefined);
+  }, [initialTaskId, tasks]);
 
-  // Realtime: keep the board in sync with the queue.
-  React.useEffect(() => {
-    const channel = supabase
-      .channel(`board:${projectId}`)
-      .on(
-        "postgres_changes",
-        {
-          event: "*",
-          schema: "public",
-          table: "tasks",
-          filter: `project_id=eq.${projectId}`,
-        },
-        (payload) => {
-          if (payload.eventType === "INSERT") {
-            const task = payload.new as Task;
-            setTasks((prev) =>
-              prev.some((t) => t.id === task.id) ? prev : [task, ...prev],
-            );
-          } else if (payload.eventType === "UPDATE") {
-            const task = payload.new as Task;
-            setTasks((prev) => prev.map((t) => (t.id === task.id ? task : t)));
-            setSelectedTask((sel) => (sel?.id === task.id ? task : sel));
-          } else if (payload.eventType === "DELETE") {
-            const old = payload.old as Partial<Task>;
-            setTasks((prev) => prev.filter((t) => t.id !== old.id));
-            setSelectedTask((sel) => (sel?.id === old.id ? null : sel));
-          }
-        },
-      )
-      .subscribe();
-
-    return () => {
-      supabase.removeChannel(channel);
-    };
-  }, [projectId, supabase]);
-
-  const visibleTasks = tasks.filter((t) => t.status !== "cancelled");
+  const visibleTasks = (tasks ?? []).filter((t) => t.status !== "cancelled");
 
   return (
     <div className="flex h-full flex-col px-8 py-6">
       <div className="mb-5 flex items-center justify-between">
         <p className="text-sm text-muted-foreground">
           {visibleTasks.length} task{visibleTasks.length === 1 ? "" : "s"} on
-          the board — updates live
+          the board — refreshes automatically
         </p>
         <Button size="sm" onClick={() => setNewTaskOpen(true)}>
           <Plus />
@@ -123,7 +107,13 @@ export function Board({
         </Button>
       </div>
 
-      {visibleTasks.length === 0 ? (
+      {loading ? (
+        <div className="grid flex-1 grid-cols-1 items-start gap-4 md:grid-cols-3 xl:grid-cols-5">
+          {COLUMNS.map((column) => (
+            <Skeleton key={column.status} className="h-40" />
+          ))}
+        </div>
+      ) : visibleTasks.length === 0 ? (
         <EmptyState
           icon={ListTodo}
           title="No tasks yet"
@@ -201,20 +191,14 @@ export function Board({
         onOpenChange={setNewTaskOpen}
         projectId={projectId}
         agents={agents}
-        onCreated={(task) =>
-          setTasks((prev) =>
-            prev.some((t) => t.id === task.id) ? prev : [task, ...prev],
-          )
-        }
+        onCreated={refresh}
       />
 
       <TaskDetailDialog
         task={selectedTask}
         agentName={agentName(selectedTask?.agent_id ?? null)}
         onClose={() => setSelectedTask(null)}
-        onTaskChanged={(task) =>
-          setTasks((prev) => prev.map((t) => (t.id === task.id ? task : t)))
-        }
+        onTaskChanged={refresh}
       />
     </div>
   );
@@ -231,7 +215,7 @@ function NewTaskDialog({
   onOpenChange: (open: boolean) => void;
   projectId: string;
   agents: Agent[];
-  onCreated: (task: Task) => void;
+  onCreated: () => void;
 }) {
   const [title, setTitle] = React.useState("");
   const [description, setDescription] = React.useState("");
@@ -260,32 +244,24 @@ function NewTaskDialog({
     }
 
     setBusy(true);
-    const supabase = createClient();
-    const {
-      data: { user },
-    } = await supabase.auth.getUser();
-
-    const { data, error: insertError } = await supabase
-      .from("tasks")
-      .insert({
-        project_id: parsed.data.projectId,
-        agent_id: parsed.data.agentId,
-        created_by: user?.id ?? null,
-        title: parsed.data.title,
-        description: parsed.data.description,
-        priority: parsed.data.priority,
-        source: parsed.data.source,
-      })
-      .select()
-      .single();
-
-    setBusy(false);
-    if (insertError || !data) {
-      setError(insertError?.message ?? "Failed to create task");
+    try {
+      await api<{ task: Task }>(`/api/projects/${projectId}/tasks`, {
+        method: "POST",
+        body: JSON.stringify({
+          agentId: parsed.data.agentId,
+          title: parsed.data.title,
+          description: parsed.data.description,
+          priority: parsed.data.priority,
+        }),
+      });
+    } catch (err) {
+      setBusy(false);
+      setError(err instanceof Error ? err.message : "Failed to create task");
       return;
     }
+    setBusy(false);
 
-    onCreated(data as Task);
+    onCreated();
     onOpenChange(false);
     setTitle("");
     setDescription("");

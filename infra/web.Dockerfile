@@ -15,6 +15,12 @@
 #     --build-arg NEXT_PUBLIC_SUPABASE_URL=... \
 #     --build-arg NEXT_PUBLIC_SUPABASE_ANON_KEY=... .
 # (docker-compose.yml wires the build args from .env automatically.)
+#
+# RUNTIME env: the container also needs SUPABASE_SERVICE_ROLE_KEY (and
+# ANTHROPIC_API_KEY for the agent-builder route) at RUNTIME — the web
+# server's API routes perform all data access with the service-role key.
+# docker-compose passes these via `env_file: .env`; they are NOT build args
+# and are never baked into the client bundle.
 # =============================================================================
 
 # ---- base: Node 22 + pnpm via corepack --------------------------------------

@@ -1,6 +1,8 @@
 import type { Metadata } from "next";
-import type { Agent, Task } from "@agent-fleet/shared";
-import { createClient } from "@/lib/supabase/server";
+import { notFound, redirect } from "next/navigation";
+import type { Agent } from "@agent-fleet/shared";
+import { getOwnedProject, getSessionUser } from "@/lib/api/page-data";
+import { getAdminClient } from "@/lib/supabase/admin";
 import { Board } from "./board";
 
 export const metadata: Metadata = { title: "Board" };
@@ -14,27 +16,24 @@ export default async function BoardPage({
 }) {
   const { id } = await params;
   const { task } = await searchParams;
-  const supabase = await createClient();
 
-  const [{ data: tasks }, { data: agents }] = await Promise.all([
-    supabase
-      .from("tasks")
-      .select("*")
-      .eq("project_id", id)
-      .order("priority", { ascending: false })
-      .order("created_at", { ascending: false })
-      .limit(400),
-    supabase
-      .from("agents")
-      .select("*")
-      .eq("project_id", id)
-      .order("created_at", { ascending: true }),
-  ]);
+  const user = await getSessionUser();
+  if (!user) redirect("/login");
+  const project = await getOwnedProject(user.id, id);
+  if (!project) notFound();
+
+  // Agents change rarely — fetch them server-side; tasks are polled by the
+  // Board itself (every 3s via /api/projects/[id]/tasks).
+  const admin = getAdminClient();
+  const { data: agents } = await admin
+    .from("agents")
+    .select("*")
+    .eq("project_id", id)
+    .order("created_at", { ascending: true });
 
   return (
     <Board
       projectId={id}
-      initialTasks={(tasks ?? []) as Task[]}
       agents={(agents ?? []) as Agent[]}
       initialTaskId={task}
     />
