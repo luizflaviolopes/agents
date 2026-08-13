@@ -69,9 +69,10 @@ agents.
   outbound message for your approval before anything is sent.
 - **Project management agents (Notion)** —
   [docs/PROJECT-MANAGEMENT-AGENTS.md](docs/PROJECT-MANAGEMENT-AGENTS.md): a
-  Project Manager agent that reads your Notion boards, sends a morning
-  digest (web + Telegram), and edits your roadmap with you in chat — plus a
-  Librarian agent that curates everything the fleet knows.
+  Project Manager agent that reads your team's Notion tasks board, sends a
+  morning digest (web + Telegram), and keeps your roadmap page organized
+  with you in chat — plus a Librarian agent that curates everything the
+  fleet knows.
 
 ## Repository layout
 
