@@ -226,6 +226,114 @@ arrays (`PENDING_ACTION_TYPES`, `PENDING_ACTION_STATUSES`,
 `KNOWLEDGE_KINDS`, `INTEGRATION_TYPES`) in
 `packages/shared/src/constants.ts`.
 
+## Project management & librarian layer (migration 0005)
+
+`supabase/migrations/0005_pm_librarian.sql` extends `schedules`,
+`agent_knowledge`, `agents`, and `messages` (no RLS — the 0002 revokes
+cover everything; only the service role has access).
+
+### Daily schedules
+
+`schedules.kind` is `'interval' | 'daily'` (default `'interval'`, existing
+rows unchanged). A single check constraint (`schedules_kind_fields_check`)
+requires `interval_minutes` for `'interval'` and `run_at_time` for
+`'daily'`; `interval_minutes` is now nullable. New columns: `run_at_time`
+(`time`, nullable), `weekdays` (`smallint[]`, default `{0,1,2,3,4,5,6}`,
+0 = Sunday .. 6 = Saturday), `timezone` (`text`, default `'UTC'`, an IANA
+name — the UI sends the browser timezone).
+
+The worker's schedule loop is unchanged for `'interval'` rows. For
+`'daily'` rows it computes `next_run_at` as the next occurrence of
+`run_at_time` in the schedule's IANA `timezone` on an allowed weekday,
+using `Intl`-based timezone math (`Intl.DateTimeFormat` with `timeZone`) —
+no new dependencies.
+
+Payloads: `createScheduleSchema` is now `{ projectId, agentId, name, kind,
+intervalMinutes?, runAtTime? ("HH:MM"), weekdays? (default all), timezone?
+(default 'UTC'), taskTitle, taskDescription?, enabled? }` with a refinement
+enforcing the kind/field pairing; `updateScheduleSchema` is the partial
+minus `projectId`, with the same refinement applied when `kind` is present.
+Constants: `SCHEDULE_KINDS`, `WEEKDAY_LABELS` (Sun..Sat, indexed by the
+`weekdays` values).
+
+### Per-agent chat
+
+`messages.agent_id` (nullable, `on delete set null`) selects the chat
+thread: **NULL = the project's manager thread** — the entire existing flow
+is unchanged — and non-null = a direct thread with that agent. The sender
+check is widened to `('user', 'manager', 'agent')`. New index:
+`messages_project_agent_created_idx (project_id, agent_id, created_at)`.
+`sendMessageSchema` gains an optional `agentId` (uuid) targeting the
+thread.
+
+The worker's message listener routes a user message with a non-null
+`agent_id` to that agent and runs it with its OWN `mcp_servers` +
+knowledge + a `reply_to_user` tool, injecting the last 20 messages of THAT
+thread as conversation context. Specialist/librarian chat sessions get
+their normal toolset (`propose_action`, `ask_agent`, notify-related) —
+the same guardrails as task runs.
+
+### notify_user tool
+
+Available to ALL agents, in task runs AND chat sessions: inserts a
+`messages` row (`sender = 'agent'`, `agent_id` = the calling agent,
+`channel = 'web'`) and mirrors the text to the owner's Telegram if
+`profiles.telegram_chat_id` is linked. It is NOT approval-gated — it only
+talks to the project owner, never to external systems (those remain behind
+`pending_actions`).
+
+### Knowledge scoping & provenance
+
+`agent_knowledge` rows are scoped to **exactly one** of `agent_id` /
+`project_id` (check constraint `agent_knowledge_scope_check`; `agent_id`
+is now nullable, `project_id` references `projects` with cascade; partial
+index `agent_knowledge_project_idx` on `project_id`). System prompt
+injection = the project-scoped docs (shared by all agents of the project)
++ the agent's own agent-scoped docs; `kind = 'voice'` docs remain
+agent-scoped only (enforced by `createKnowledgeSchema`).
+
+Provenance columns (all nullable, `on delete set null`):
+`created_by_agent_id`, `updated_by_agent_id` (references `agents`), and
+`source_run_id` (references `task_runs`) record which agent wrote a doc
+from which run. All-null = human-authored via the UI; a human edit nulls
+out `updated_by_agent_id`.
+
+`createKnowledgeSchema` is now `{ scope: 'agent' | 'project', agentId?,
+projectId?, kind, title, content }` — the id matching `scope` is required;
+`updateKnowledgeSchema` stays scope-immutable (partial `kind`/`title`/
+`content`).
+
+### Librarian
+
+A new agent role `'librarian'` (`agents_role_check` widened; partial
+unique index `one_librarian_per_project` enforces at most one per
+project, mirroring `one_manager_per_project`). The librarian curates all
+knowledge for its project. Only librarians get two extra tools:
+
+- `save_knowledge({ scope: 'project' | 'agent', agent_name?, title,
+  content, mode: 'create' | 'replace' | 'append' })` — for
+  `replace`/`append` it matches the existing doc by scope + title; every
+  write sets the provenance columns (`created_by_agent_id` /
+  `updated_by_agent_id` / `source_run_id`).
+- `read_project_activity({ since? })` — returns messages + finished tasks
+  (with results) across the project since the given timestamp or the
+  stored cursor, as compact JSON. `agents.activity_cursor` (timestamptz,
+  nullable, added in 0005) is the high-water mark; the worker advances it
+  after a successful librarian run.
+
+ALL agents' standard preamble gains this rule: durable facts learned in
+conversation must be forwarded to the project's librarian via `ask_agent`
+(if a librarian exists).
+
+Shared contract: `ScheduleKind`, updated `ScheduleRow` /
+`AgentKnowledgeRow` / `AgentRole` / `Agent.activity_cursor` /
+`Message.agent_id` / `MessageSender` in
+`packages/shared/src/db-types.ts`; `createScheduleSchema`,
+`updateScheduleSchema`, `createKnowledgeSchema`, `updateKnowledgeSchema`,
+`sendMessageSchema` in `packages/shared/src/schemas.ts`; `AGENT_ROLES`
+(now includes `librarian`), `SCHEDULE_KINDS`, `WEEKDAY_LABELS` in
+`packages/shared/src/constants.ts`.
+
 ## Environment
 
 See `.env.example`: Supabase URL/keys, `ANTHROPIC_API_KEY`,

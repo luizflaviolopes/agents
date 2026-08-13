@@ -9,7 +9,7 @@
 
 export type CloneStatus = "pending" | "cloning" | "ready" | "error";
 
-export type AgentRole = "manager" | "specialist";
+export type AgentRole = "manager" | "specialist" | "librarian";
 
 export type TaskSource =
   | "web"
@@ -39,7 +39,7 @@ export type RunLogEventType =
   | "status"
   | "error";
 
-export type MessageSender = "user" | "manager";
+export type MessageSender = "user" | "manager" | "agent";
 
 export type MessageChannel = "web" | "telegram";
 
@@ -59,6 +59,8 @@ export type PendingActionStatus =
   | "failed";
 
 export type KnowledgeKind = "knowledge" | "voice";
+
+export type ScheduleKind = "interval" | "daily";
 
 export type IntegrationType = "slack" | "gmail";
 
@@ -151,6 +153,12 @@ export interface Agent {
   /** jsonb array of MCP server configs. */
   mcp_servers: McpServerConfig[];
   is_active: boolean;
+  /**
+   * High-water mark for the librarian's read_project_activity sweeps (0005);
+   * the worker advances it after a successful librarian run. Null for
+   * non-librarian agents and before the first sweep.
+   */
+  activity_cursor: string | null;
   created_at: string;
 }
 
@@ -207,7 +215,15 @@ export interface ScheduleRow {
   project_id: string;
   agent_id: string;
   name: string;
-  interval_minutes: number;
+  kind: ScheduleKind;
+  /** Required (non-null) when kind = 'interval'. */
+  interval_minutes: number | null;
+  /** Required (non-null) when kind = 'daily'. Postgres `time`, e.g. "09:30:00". */
+  run_at_time: string | null;
+  /** Allowed weekdays for 'daily' schedules: 0 = Sunday .. 6 = Saturday. */
+  weekdays: number[];
+  /** IANA timezone name (UI sends the browser timezone). */
+  timezone: string;
   task_title: string;
   task_description: string;
   enabled: boolean;
@@ -235,10 +251,21 @@ export interface PendingActionRow {
 
 export interface AgentKnowledgeRow {
   id: string;
-  agent_id: string;
+  /** Exactly one of agent_id / project_id is non-null (scope of the doc). */
+  agent_id: string | null;
+  /** Set for project-scoped docs, injected into every agent of the project. */
+  project_id: string | null;
   kind: KnowledgeKind;
   title: string;
   content: string;
+  /**
+   * Provenance (0005): which agent wrote/updated the doc from which run.
+   * All null = human-authored via the UI; human edits null out
+   * updated_by_agent_id.
+   */
+  created_by_agent_id: string | null;
+  updated_by_agent_id: string | null;
+  source_run_id: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -257,6 +284,11 @@ export interface Message {
   id: string;
   project_id: string;
   task_id: string | null;
+  /**
+   * Chat thread (0005): null = the project's manager thread (existing
+   * behavior); non-null = a direct thread with that agent.
+   */
+  agent_id: string | null;
   sender: MessageSender;
   channel: MessageChannel;
   content: string;

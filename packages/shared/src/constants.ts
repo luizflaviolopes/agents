@@ -4,6 +4,7 @@ import type {
   KnowledgeKind,
   PendingActionStatus,
   PendingActionType,
+  ScheduleKind,
   TaskStatus,
 } from "./db-types";
 
@@ -24,7 +25,25 @@ export const TASK_STATUSES = [
 export const AGENT_ROLES = [
   "manager",
   "specialist",
+  "librarian",
 ] as const satisfies readonly AgentRole[];
+
+/** All schedule kinds. */
+export const SCHEDULE_KINDS = [
+  "interval",
+  "daily",
+] as const satisfies readonly ScheduleKind[];
+
+/** Weekday labels indexed by schedules.weekdays values (0 = Sunday). */
+export const WEEKDAY_LABELS = [
+  "Sun",
+  "Mon",
+  "Tue",
+  "Wed",
+  "Thu",
+  "Fri",
+  "Sat",
+] as const;
 
 /** All pending-action types (outbound actions an agent can propose). */
 export const PENDING_ACTION_TYPES = [

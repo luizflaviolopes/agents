@@ -66,6 +66,11 @@ export type CreateTaskInput = z.infer<typeof createTaskSchema>;
 
 export const sendMessageSchema = z.object({
   projectId: z.string().uuid(),
+  /**
+   * Target chat thread (0005): omitted/undefined = the project's manager
+   * thread; a uuid = the direct thread with that agent.
+   */
+  agentId: z.string().uuid().optional(),
   content: z.string().min(1).max(10000),
   channel: z.enum(["web", "telegram"]).default("web"),
 });
@@ -82,20 +87,66 @@ export type AgentBuilderRequestInput = z.infer<typeof agentBuilderRequestSchema>
 // integrations
 // ---------------------------------------------------------------------------
 
-export const createScheduleSchema = z.object({
+/**
+ * Ensures the timing field matching `kind` is present. Applied to both
+ * create (kind always present) and update (only when kind is present)
+ * payloads.
+ */
+const scheduleKindRefinement = (
+  val: {
+    kind?: "interval" | "daily";
+    intervalMinutes?: number;
+    runAtTime?: string;
+  },
+  ctx: z.RefinementCtx,
+) => {
+  if (val.kind === "interval" && val.intervalMinutes === undefined) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["intervalMinutes"],
+      message: "intervalMinutes is required when kind is 'interval'",
+    });
+  }
+  if (val.kind === "daily" && val.runAtTime === undefined) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["runAtTime"],
+      message: "runAtTime is required when kind is 'daily'",
+    });
+  }
+};
+
+const scheduleBaseSchema = z.object({
   projectId: z.string().uuid(),
   agentId: z.string().uuid(),
   name: z.string().min(1).max(120),
-  intervalMinutes: z.number().int().min(1),
+  kind: z.enum(["interval", "daily"]),
+  /** Required when kind = 'interval'. */
+  intervalMinutes: z.number().int().min(1).optional(),
+  /** Required when kind = 'daily'. 24h "HH:MM" wall-clock time. */
+  runAtTime: z
+    .string()
+    .regex(/^\d{2}:\d{2}$/, "runAtTime must be 'HH:MM'")
+    .optional(),
+  /** Allowed weekdays for 'daily' schedules: 0 = Sunday .. 6 = Saturday. */
+  weekdays: z
+    .array(z.number().int().min(0).max(6))
+    .default([0, 1, 2, 3, 4, 5, 6]),
+  /** IANA timezone name (UI sends the browser timezone). */
+  timezone: z.string().min(1).default("UTC"),
   taskTitle: z.string().min(1).max(300),
   taskDescription: z.string().max(10000).optional(),
   enabled: z.boolean().default(true),
 });
+
+export const createScheduleSchema =
+  scheduleBaseSchema.superRefine(scheduleKindRefinement);
 export type CreateScheduleInput = z.infer<typeof createScheduleSchema>;
 
-export const updateScheduleSchema = createScheduleSchema
+export const updateScheduleSchema = scheduleBaseSchema
   .omit({ projectId: true })
-  .partial();
+  .partial()
+  .superRefine(scheduleKindRefinement);
 export type UpdateScheduleInput = z.infer<typeof updateScheduleSchema>;
 
 export const decidePendingActionSchema = z.object({
@@ -108,16 +159,45 @@ export const decidePendingActionSchema = z.object({
 });
 export type DecidePendingActionInput = z.infer<typeof decidePendingActionSchema>;
 
-export const createKnowledgeSchema = z.object({
-  agentId: z.string().uuid(),
+const knowledgeBaseSchema = z.object({
+  /** 'agent' requires agentId; 'project' requires projectId. */
+  scope: z.enum(["agent", "project"]),
+  agentId: z.string().uuid().optional(),
+  projectId: z.string().uuid().optional(),
   kind: z.enum(["knowledge", "voice"]).default("knowledge"),
   title: z.string().min(1).max(300),
   content: z.string().max(100000).default(""),
 });
+
+export const createKnowledgeSchema = knowledgeBaseSchema.superRefine(
+  (val, ctx) => {
+    if (val.scope === "agent" && val.agentId === undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["agentId"],
+        message: "agentId is required when scope is 'agent'",
+      });
+    }
+    if (val.scope === "project" && val.projectId === undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["projectId"],
+        message: "projectId is required when scope is 'project'",
+      });
+    }
+    if (val.kind === "voice" && val.scope !== "agent") {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["kind"],
+        message: "kind 'voice' is only valid for scope 'agent'",
+      });
+    }
+  },
+);
 export type CreateKnowledgeInput = z.infer<typeof createKnowledgeSchema>;
 
-export const updateKnowledgeSchema = createKnowledgeSchema
-  .omit({ agentId: true })
+export const updateKnowledgeSchema = knowledgeBaseSchema
+  .omit({ scope: true, agentId: true, projectId: true })
   .partial();
 export type UpdateKnowledgeInput = z.infer<typeof updateKnowledgeSchema>;
 
