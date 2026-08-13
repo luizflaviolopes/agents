@@ -26,8 +26,12 @@ export interface McpServerRow {
   env: string; // KEY=VALUE, one per line
 }
 
+/** Roles the user can pick — managers are never created/changed here. */
+export type CreatableRole = "specialist" | "librarian";
+
 export interface AgentFormValue {
   name: string;
+  role: CreatableRole;
   instructions: string;
   model: string;
   workspaceId: string; // "" = no workspace
@@ -38,6 +42,7 @@ export interface AgentFormValue {
 export function emptyAgentForm(): AgentFormValue {
   return {
     name: "",
+    role: "specialist",
     instructions: "",
     model: DEFAULT_MODEL,
     workspaceId: "",
@@ -49,6 +54,7 @@ export function emptyAgentForm(): AgentFormValue {
 export function agentToForm(agent: Agent): AgentFormValue {
   return {
     name: agent.name,
+    role: agent.role === "librarian" ? "librarian" : "specialist",
     instructions: agent.instructions,
     model: agent.model,
     workspaceId: agent.workspace_id ?? "",
@@ -99,12 +105,18 @@ export function AgentForm({
   onChange,
   workspaces,
   disableRole,
+  librarianTaken,
 }: {
   value: AgentFormValue;
   onChange: (value: AgentFormValue) => void;
   workspaces: Workspace[];
-  /** Managers keep their role; only informational here. */
+  /** Managers keep their role; hides the role select entirely. */
   disableRole?: boolean;
+  /**
+   * Another agent in the project is already the librarian — the option is
+   * disabled (one librarian per project).
+   */
+  librarianTaken?: boolean;
 }) {
   const [pluginDraft, setPluginDraft] = React.useState("");
 
@@ -177,26 +189,55 @@ export function AgentForm({
         />
       </div>
 
-      <div className="space-y-2">
-        <Label htmlFor="agent-workspace">Workspace</Label>
-        <Select
-          id="agent-workspace"
-          value={value.workspaceId}
-          onChange={(e) => set("workspaceId", e.target.value)}
-        >
-          <option value="">No workspace</option>
-          {workspaces.map((ws) => (
-            <option key={ws.id} value={ws.id}>
-              {ws.name}
-            </option>
-          ))}
-        </Select>
-        {disableRole && (
-          <p className="text-xs text-muted-foreground">
-            This agent is the project manager — its role cannot change.
-          </p>
+      <div className="grid grid-cols-2 gap-3">
+        <div className="space-y-2">
+          <Label htmlFor="agent-workspace">Workspace</Label>
+          <Select
+            id="agent-workspace"
+            value={value.workspaceId}
+            onChange={(e) => set("workspaceId", e.target.value)}
+          >
+            <option value="">No workspace</option>
+            {workspaces.map((ws) => (
+              <option key={ws.id} value={ws.id}>
+                {ws.name}
+              </option>
+            ))}
+          </Select>
+        </div>
+        {!disableRole && (
+          <div className="space-y-2">
+            <Label htmlFor="agent-role">Role</Label>
+            <Select
+              id="agent-role"
+              value={value.role}
+              onChange={(e) => set("role", e.target.value as CreatableRole)}
+            >
+              <option value="specialist">Specialist</option>
+              <option value="librarian" disabled={librarianTaken}>
+                Librarian
+              </option>
+            </Select>
+            {librarianTaken ? (
+              <p className="text-xs text-muted-foreground">
+                Project already has a librarian.
+              </p>
+            ) : (
+              value.role === "librarian" && (
+                <p className="text-xs text-muted-foreground">
+                  The librarian curates all project knowledge — one per
+                  project.
+                </p>
+              )
+            )}
+          </div>
         )}
       </div>
+      {disableRole && (
+        <p className="text-xs text-muted-foreground">
+          This agent is the project manager — its role cannot change.
+        </p>
+      )}
 
       {/* Plugins */}
       <div className="space-y-2">

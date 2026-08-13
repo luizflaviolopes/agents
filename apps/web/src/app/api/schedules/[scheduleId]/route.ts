@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { updateScheduleSchema } from "@agent-fleet/shared";
-import type { Agent } from "@agent-fleet/shared";
+import type { Agent, ScheduleKind } from "@agent-fleet/shared";
 import {
   apiHandler,
   jsonError,
@@ -8,6 +8,10 @@ import {
   requireScheduleAccess,
   requireUser,
 } from "@/lib/api/auth";
+import {
+  computeDailyNextRun,
+  isValidTimezone,
+} from "@/lib/api/daily-next-run";
 import { getAdminClient } from "@/lib/supabase/admin";
 
 export const runtime = "nodejs";
@@ -46,21 +50,82 @@ export const PATCH = apiHandler(async (request: Request, { params }: Params) => 
     }
     patch.agent_id = input.agentId;
   }
-  if (
-    input.intervalMinutes !== undefined &&
-    input.intervalMinutes !== schedule.interval_minutes
-  ) {
-    patch.interval_minutes = input.intervalMinutes;
-    // A new cadence restarts the clock from now.
-    patch.next_run_at = new Date(
-      Date.now() + input.intervalMinutes * 60_000,
-    ).toISOString();
+
+  // Timing fields. Effective values = the patch merged over the stored row;
+  // `kind` in the payload requires its matching field (schema refinement).
+  const kind: ScheduleKind = input.kind ?? schedule.kind;
+  if (input.kind !== undefined) patch.kind = input.kind;
+
+  if (input.weekdays !== undefined) {
+    if (input.weekdays.length === 0) {
+      return jsonError(400, "Pick at least one weekday");
+    }
+    patch.weekdays = input.weekdays;
   }
+  if (input.timezone !== undefined) {
+    if (!isValidTimezone(input.timezone)) {
+      return jsonError(400, "Invalid timezone — expected an IANA name");
+    }
+    patch.timezone = input.timezone;
+  }
+  if (input.runAtTime !== undefined) patch.run_at_time = input.runAtTime;
+  if (input.intervalMinutes !== undefined) {
+    patch.interval_minutes = input.intervalMinutes;
+  }
+
+  if (kind === "interval") {
+    const switchedKind = input.kind === "interval" && schedule.kind !== "interval";
+    const minutes = input.intervalMinutes ?? schedule.interval_minutes;
+    if (
+      minutes != null &&
+      (switchedKind ||
+        (input.intervalMinutes !== undefined &&
+          input.intervalMinutes !== schedule.interval_minutes))
+    ) {
+      // A new cadence (or a switch back to interval) restarts the clock.
+      patch.next_run_at = new Date(Date.now() + minutes * 60_000).toISOString();
+    }
+  } else {
+    // Daily: recompute next_run_at whenever any timing input changed. The
+    // worker recomputes on every fire; the route computes the first
+    // occurrence so the edit takes effect without firing immediately.
+    const timingChanged =
+      input.kind !== undefined ||
+      input.runAtTime !== undefined ||
+      input.weekdays !== undefined ||
+      input.timezone !== undefined;
+    if (timingChanged) {
+      const runAtTime =
+        input.runAtTime ?? (schedule.run_at_time ?? "").slice(0, 5);
+      if (!/^\d{2}:\d{2}$/.test(runAtTime)) {
+        return jsonError(400, "runAtTime is required for a daily schedule");
+      }
+      const weekdays = input.weekdays ?? schedule.weekdays;
+      const timezone = input.timezone ?? schedule.timezone;
+      if (!isValidTimezone(timezone)) {
+        return jsonError(400, "Invalid timezone — expected an IANA name");
+      }
+      patch.next_run_at = computeDailyNextRun(
+        runAtTime,
+        weekdays,
+        timezone,
+      ).toISOString();
+    }
+  }
+
   if (input.enabled !== undefined) {
     patch.enabled = input.enabled;
-    // Re-enabling fires as soon as the worker's schedule loop next scans.
-    if (input.enabled && !schedule.enabled) {
-      patch.next_run_at = new Date().toISOString();
+    // Re-enabling an interval schedule fires as soon as the worker's
+    // schedule loop next scans; a daily schedule waits for its next slot.
+    if (input.enabled && !schedule.enabled && patch.next_run_at === undefined) {
+      patch.next_run_at =
+        kind === "daily" && schedule.run_at_time
+          ? computeDailyNextRun(
+              schedule.run_at_time.slice(0, 5),
+              schedule.weekdays,
+              schedule.timezone,
+            ).toISOString()
+          : new Date().toISOString();
     }
   }
   if (Object.keys(patch).length === 0) return jsonError(400, "Nothing to update");

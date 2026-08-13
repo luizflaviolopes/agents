@@ -85,9 +85,13 @@ export function RunStatusBadge({ status }: { status: RunStatus }) {
 }
 
 export function RoleBadge({ role }: { role: AgentRole }) {
-  return role === "manager" ? (
-    <Badge variant="default">manager</Badge>
-  ) : (
-    <Badge variant="secondary">specialist</Badge>
-  );
+  if (role === "manager") return <Badge variant="default">manager</Badge>;
+  if (role === "librarian") {
+    return (
+      <Badge className="border-transparent bg-cyan-500/15 text-cyan-400">
+        librarian
+      </Badge>
+    );
+  }
+  return <Badge variant="secondary">specialist</Badge>;
 }

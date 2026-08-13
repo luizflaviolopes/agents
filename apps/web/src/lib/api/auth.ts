@@ -208,23 +208,35 @@ export async function requireScheduleAccess(
   return schedule as ScheduleRow;
 }
 
-/** Knowledge-doc access: walk doc → agent → project → owner. */
+/**
+ * Knowledge-doc access. A doc is scoped to exactly one of agent_id /
+ * project_id (0005): agent-scoped docs walk doc → agent → project → owner;
+ * project-scoped docs walk doc → project → owner.
+ */
 export async function requireKnowledgeAccess(
   userId: string,
   docId: string,
 ): Promise<AgentKnowledgeRow> {
   const admin = getAdminClient();
-  const { data: doc, error } = await admin
+  const { data, error } = await admin
     .from("agent_knowledge")
     .select("*")
     .eq("id", docId)
     .maybeSingle();
   if (error) throw new ApiResponseError(jsonError(500, error.message));
-  if (!doc) {
+  if (!data) {
     throw new ApiResponseError(jsonError(404, "Knowledge doc not found"));
   }
-  await requireAgentAccess(userId, (doc as AgentKnowledgeRow).agent_id);
-  return doc as AgentKnowledgeRow;
+  const doc = data as AgentKnowledgeRow;
+  if (doc.agent_id) {
+    await requireAgentAccess(userId, doc.agent_id);
+  } else if (doc.project_id) {
+    await requireProjectAccess(userId, doc.project_id);
+  } else {
+    // Unreachable: the scope check constraint guarantees one of the two.
+    throw new ApiResponseError(jsonError(500, "Knowledge doc has no scope"));
+  }
+  return doc;
 }
 
 /**

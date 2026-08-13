@@ -8,6 +8,10 @@ import {
   requireProjectAccess,
   requireUser,
 } from "@/lib/api/auth";
+import {
+  computeDailyNextRun,
+  isValidTimezone,
+} from "@/lib/api/daily-next-run";
 import { getAdminClient } from "@/lib/supabase/admin";
 
 export const runtime = "nodejs";
@@ -52,17 +56,40 @@ export const POST = apiHandler(async (request: Request, { params }: Params) => {
     return jsonError(400, "Agent does not belong to this project");
   }
 
+  // Interval schedules fire on the worker's next scan (as before); daily
+  // schedules start at the next matching wall-clock occurrence.
+  let nextRunAt: string;
+  if (input.kind === "daily") {
+    if (!isValidTimezone(input.timezone)) {
+      return jsonError(400, "Invalid timezone — expected an IANA name");
+    }
+    if (input.weekdays.length === 0) {
+      return jsonError(400, "Pick at least one weekday");
+    }
+    nextRunAt = computeDailyNextRun(
+      input.runAtTime!,
+      input.weekdays,
+      input.timezone,
+    ).toISOString();
+  } else {
+    nextRunAt = new Date().toISOString();
+  }
+
   const { data: schedule, error } = await admin
     .from("schedules")
     .insert({
       project_id: id,
       agent_id: input.agentId,
       name: input.name,
-      interval_minutes: input.intervalMinutes,
+      kind: input.kind,
+      interval_minutes: input.kind === "interval" ? input.intervalMinutes : null,
+      run_at_time: input.kind === "daily" ? input.runAtTime : null,
+      weekdays: input.weekdays,
+      timezone: input.timezone,
       task_title: input.taskTitle,
       task_description: input.taskDescription ?? "",
       enabled: input.enabled,
-      next_run_at: new Date().toISOString(),
+      next_run_at: nextRunAt,
     })
     .select("*, agent:agents(name)")
     .single();

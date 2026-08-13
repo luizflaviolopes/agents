@@ -1,7 +1,8 @@
 # Creating Agents
 
-An agent is a row in the `agents` table: a name, a role (`manager` or
-`specialist` — one manager per project, enforced by the database), an optional
+An agent is a row in the `agents` table: a name, a role (`manager`,
+`specialist`, or `librarian` — one manager and one librarian per project,
+enforced by the database), an optional
 workspace, and four config fields the worker feeds into every Claude Agent SDK
 run:
 
@@ -152,7 +153,10 @@ worker's own environment where possible.
 
 For full worked examples of MCP-powered agents — Slack and Gmail triage
 agents with ready-to-paste configs, instructions, and voice profiles — see
-[COMMS-AGENTS.md](COMMS-AGENTS.md).
+[COMMS-AGENTS.md](COMMS-AGENTS.md). For a Notion-backed Project Manager
+(morning digests, roadmap editing in chat) and the knowledge-curating
+Librarian agent, see
+[PROJECT-MANAGEMENT-AGENTS.md](PROJECT-MANAGEMENT-AGENTS.md).
 
 ## The `plugins` field (roadmap)
 

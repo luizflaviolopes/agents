@@ -12,6 +12,7 @@ const TABS = [
   { segment: "review", label: "Review" },
   { segment: "chat", label: "Chat" },
   { segment: "agents", label: "Agents" },
+  { segment: "knowledge", label: "Knowledge" },
   { segment: "schedules", label: "Schedules" },
   { segment: "workspaces", label: "Workspaces" },
   { segment: "activity", label: "Activity" },

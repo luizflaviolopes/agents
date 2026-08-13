@@ -129,8 +129,11 @@ export function AgentsPanel({
     }
   }
 
+  const roleRank = { manager: 0, librarian: 1, specialist: 2 } as const;
   const sorted = [...agents].sort((a, b) => {
-    if (a.role !== b.role) return a.role === "manager" ? -1 : 1;
+    if (a.role !== b.role) {
+      return (roleRank[a.role] ?? 3) - (roleRank[b.role] ?? 3);
+    }
     return (a.created_at ?? "").localeCompare(b.created_at ?? "");
   });
 
@@ -241,12 +244,16 @@ export function AgentsPanel({
         onOpenChange={setCreateOpen}
         projectId={projectId}
         workspaces={workspaces}
+        librarianTaken={agents.some((a) => a.role === "librarian")}
         onCreated={(agent) => setAgents((prev) => [...prev, agent])}
       />
 
       <EditAgentDialog
         agent={editAgent}
         workspaces={workspaces}
+        librarianTaken={agents.some(
+          (a) => a.role === "librarian" && a.id !== editAgent?.id,
+        )}
         onClose={() => setEditAgent(null)}
         onSaved={(agent) =>
           setAgents((prev) => prev.map((a) => (a.id === agent.id ? agent : a)))
@@ -278,12 +285,15 @@ function CreateAgentDialog({
   onOpenChange,
   projectId,
   workspaces,
+  librarianTaken,
   onCreated,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   projectId: string;
   workspaces: Workspace[];
+  /** The project already has a librarian — the role option is disabled. */
+  librarianTaken: boolean;
   onCreated: (agent: Agent) => void;
 }) {
   const [tab, setTab] = React.useState<"manual" | "builder">("manual");
@@ -326,6 +336,7 @@ function CreateAgentDialog({
       const p = json.proposal;
       setForm({
         name: p.name ?? "",
+        role: "specialist",
         instructions: p.instructions ?? "",
         model: p.model || emptyAgentForm().model,
         workspaceId: "",
@@ -358,6 +369,7 @@ function CreateAgentDialog({
           method: "POST",
           body: JSON.stringify({
             name: form.name.trim(),
+            role: form.role,
             workspaceId: form.workspaceId || null,
             instructions: form.instructions,
             model: form.model,
@@ -416,6 +428,7 @@ function CreateAgentDialog({
                   value={form}
                   onChange={setForm}
                   workspaces={workspaces}
+                  librarianTaken={librarianTaken}
                 />
               </div>
               {error && <p className="text-sm text-destructive">{error}</p>}
@@ -487,6 +500,7 @@ function CreateAgentDialog({
                     value={form}
                     onChange={setForm}
                     workspaces={workspaces}
+                    librarianTaken={librarianTaken}
                   />
                 </div>
                 {error && <p className="text-sm text-destructive">{error}</p>}
@@ -519,11 +533,14 @@ function CreateAgentDialog({
 function EditAgentDialog({
   agent,
   workspaces,
+  librarianTaken,
   onClose,
   onSaved,
 }: {
   agent: Agent | null;
   workspaces: Workspace[];
+  /** Another agent is already the librarian — the role option is disabled. */
+  librarianTaken: boolean;
   onClose: () => void;
   onSaved: (agent: Agent) => void;
 }) {
@@ -555,6 +572,8 @@ function EditAgentDialog({
           method: "PATCH",
           body: JSON.stringify({
             name: form.name.trim(),
+            // Managers keep their role; the form hides the select for them.
+            ...(agent.role !== "manager" ? { role: form.role } : {}),
             instructions: form.instructions,
             model: form.model,
             workspaceId: form.workspaceId || null,
@@ -589,6 +608,7 @@ function EditAgentDialog({
               onChange={setForm}
               workspaces={workspaces}
               disableRole={agent?.role === "manager"}
+              librarianTaken={librarianTaken}
             />
           </div>
           {error && <p className="text-sm text-destructive">{error}</p>}

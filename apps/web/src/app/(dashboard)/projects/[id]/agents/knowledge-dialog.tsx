@@ -2,9 +2,8 @@
 
 import * as React from "react";
 import { BookOpen, Mic, Pencil, Plus, Trash2 } from "lucide-react";
-import type { Agent, AgentKnowledgeRow, KnowledgeKind } from "@agent-fleet/shared";
+import type { Agent, KnowledgeKind } from "@agent-fleet/shared";
 import { api } from "@/lib/api-client";
-import { timeAgo } from "@/lib/format";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -21,6 +20,10 @@ import { Select } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
 import { ConfirmDialog } from "@/components/confirm-dialog";
+import {
+  ProvenanceLine,
+  type KnowledgeDocJoined,
+} from "@/components/knowledge-provenance";
 
 const KIND_GROUPS: { kind: KnowledgeKind; label: string; icon: typeof Mic }[] =
   [
@@ -29,7 +32,7 @@ const KIND_GROUPS: { kind: KnowledgeKind; label: string; icon: typeof Mic }[] =
   ];
 
 interface EditorState {
-  doc: AgentKnowledgeRow | null; // null = creating
+  doc: KnowledgeDocJoined | null; // null = creating
   kind: KnowledgeKind;
   title: string;
   content: string;
@@ -47,9 +50,9 @@ export function KnowledgeDialog({
   agent: Agent | null;
   onClose: () => void;
 }) {
-  const [docs, setDocs] = React.useState<AgentKnowledgeRow[] | null>(null);
+  const [docs, setDocs] = React.useState<KnowledgeDocJoined[] | null>(null);
   const [editor, setEditor] = React.useState<EditorState | null>(null);
-  const [deleteDoc, setDeleteDoc] = React.useState<AgentKnowledgeRow | null>(
+  const [deleteDoc, setDeleteDoc] = React.useState<KnowledgeDocJoined | null>(
     null,
   );
   const [error, setError] = React.useState<string | null>(null);
@@ -64,7 +67,7 @@ export function KnowledgeDialog({
       return;
     }
     let cancelled = false;
-    api<{ docs: AgentKnowledgeRow[] }>(`/api/agents/${agent.id}/knowledge`)
+    api<{ docs: KnowledgeDocJoined[] }>(`/api/agents/${agent.id}/knowledge`)
       .then(({ docs }) => {
         if (!cancelled) setDocs(docs);
       })
@@ -92,7 +95,7 @@ export function KnowledgeDialog({
     setError(null);
     try {
       if (editor.doc) {
-        const { doc } = await api<{ doc: AgentKnowledgeRow }>(
+        const { doc } = await api<{ doc: KnowledgeDocJoined }>(
           `/api/knowledge/${editor.doc.id}`,
           {
             method: "PATCH",
@@ -107,7 +110,7 @@ export function KnowledgeDialog({
           (prev ?? []).map((d) => (d.id === doc.id ? doc : d)),
         );
       } else {
-        const { doc } = await api<{ doc: AgentKnowledgeRow }>(
+        const { doc } = await api<{ doc: KnowledgeDocJoined }>(
           `/api/agents/${agent.id}/knowledge`,
           {
             method: "POST",
@@ -128,7 +131,7 @@ export function KnowledgeDialog({
     }
   }
 
-  async function remove(doc: AgentKnowledgeRow) {
+  async function remove(doc: KnowledgeDocJoined) {
     try {
       await api(`/api/knowledge/${doc.id}`, { method: "DELETE" });
       setDocs((prev) => (prev ?? []).filter((d) => d.id !== doc.id));
@@ -256,9 +259,7 @@ export function KnowledgeDialog({
                                   <div className="truncate text-sm font-medium">
                                     {doc.title}
                                   </div>
-                                  <p className="truncate text-xs text-muted-foreground">
-                                    updated {timeAgo(doc.updated_at)}
-                                  </p>
+                                  <ProvenanceLine doc={doc} />
                                 </div>
                                 <Badge
                                   variant={

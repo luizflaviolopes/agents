@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { z } from "zod";
 import { createAgentSchema } from "@agent-fleet/shared";
 import {
   apiHandler,
@@ -30,13 +31,35 @@ export const GET = apiHandler(async (_request: Request, { params }: Params) => {
   return NextResponse.json({ agents: agents ?? [] });
 });
 
-/** POST /api/projects/[id]/agents — create a specialist agent. */
+/**
+ * Creatable roles: specialists and (at most one) librarian. The manager is
+ * created with the project and can never be added here.
+ */
+const createAgentWithRoleSchema = createAgentSchema.extend({
+  role: z.enum(["specialist", "librarian"]).default("specialist"),
+});
+
+/** POST /api/projects/[id]/agents — create a specialist/librarian agent. */
 export const POST = apiHandler(async (request: Request, { params }: Params) => {
   const { id } = await params;
   const user = await requireUser();
   await requireProjectAccess(user.id, id);
-  const input = await parseBody(request, createAgentSchema, { projectId: id });
+  const input = await parseBody(request, createAgentWithRoleSchema, {
+    projectId: id,
+  });
   const admin = getAdminClient();
+
+  if (input.role === "librarian") {
+    // Mirrors the one_librarian_per_project unique index with a clear error.
+    const { data: librarian, error: librarianError } = await admin
+      .from("agents")
+      .select("id")
+      .eq("project_id", id)
+      .eq("role", "librarian")
+      .maybeSingle();
+    if (librarianError) return jsonError(500, librarianError.message);
+    if (librarian) return jsonError(400, "Project already has a librarian");
+  }
 
   const { data: agent, error } = await admin
     .from("agents")
@@ -44,7 +67,7 @@ export const POST = apiHandler(async (request: Request, { params }: Params) => {
       project_id: id,
       workspace_id: input.workspaceId ?? null,
       name: input.name,
-      role: "specialist",
+      role: input.role,
       instructions: input.instructions,
       model: input.model,
       plugins: input.plugins,

@@ -17,6 +17,8 @@ type Params = { params: Promise<{ agentId: string }> };
 
 const updateAgentSchema = z.object({
   name: z.string().min(1).max(120).optional(),
+  /** Managers keep their role; specialist ↔ librarian is allowed. */
+  role: z.enum(["specialist", "librarian"]).optional(),
   instructions: z.string().optional(),
   model: z.string().min(1).optional(),
   workspaceId: z.string().uuid().nullable().optional(),
@@ -29,12 +31,31 @@ const updateAgentSchema = z.object({
 export const PATCH = apiHandler(async (request: Request, { params }: Params) => {
   const { agentId } = await params;
   const user = await requireUser();
-  await requireAgentAccess(user.id, agentId);
+  const agent = await requireAgentAccess(user.id, agentId);
   const input = await parseBody(request, updateAgentSchema);
   const admin = getAdminClient();
 
   const patch: Record<string, unknown> = {};
   if (input.name !== undefined) patch.name = input.name;
+  if (input.role !== undefined && input.role !== agent.role) {
+    if (agent.role === "manager") {
+      return jsonError(400, "The manager agent's role cannot change.");
+    }
+    if (input.role === "librarian") {
+      // Mirrors the one_librarian_per_project unique index with a clear
+      // error.
+      const { data: librarian, error: librarianError } = await admin
+        .from("agents")
+        .select("id")
+        .eq("project_id", agent.project_id)
+        .eq("role", "librarian")
+        .neq("id", agentId)
+        .maybeSingle();
+      if (librarianError) return jsonError(500, librarianError.message);
+      if (librarian) return jsonError(400, "Project already has a librarian");
+    }
+    patch.role = input.role;
+  }
   if (input.instructions !== undefined) patch.instructions = input.instructions;
   if (input.model !== undefined) patch.model = input.model;
   if (input.workspaceId !== undefined) patch.workspace_id = input.workspaceId;
@@ -43,16 +64,16 @@ export const PATCH = apiHandler(async (request: Request, { params }: Params) => 
   if (input.isActive !== undefined) patch.is_active = input.isActive;
   if (Object.keys(patch).length === 0) return jsonError(400, "Nothing to update");
 
-  const { data: agent, error } = await admin
+  const { data: updated, error } = await admin
     .from("agents")
     .update(patch)
     .eq("id", agentId)
     .select()
     .single();
-  if (error || !agent) {
+  if (error || !updated) {
     return jsonError(500, error?.message ?? "Failed to update agent");
   }
-  return NextResponse.json({ agent });
+  return NextResponse.json({ agent: updated });
 });
 
 /** DELETE /api/agents/[agentId] — delete a specialist (managers are kept). */

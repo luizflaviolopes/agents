@@ -67,7 +67,7 @@ async function main(): Promise<void> {
   const taskSlots = new Semaphore(MAX_CONCURRENT_TASKS);
   const executor = new TaskExecutor(supabase, workspaces, config.workspacesRoot, taskSlots);
   const poller = new TaskPoller(supabase, taskSlots, (task) => executor.executeTask(task));
-  const managerListener = new ManagerListener(supabase);
+  const managerListener = new ManagerListener(supabase, workspaces, config.workspacesRoot);
   const scheduler = new Scheduler(supabase);
   const actionExecutor = new ActionExecutor(supabase);
 
@@ -78,9 +78,10 @@ async function main(): Promise<void> {
     executor.setTelegramNotifier(notifier);
     managerListener.setTelegramNotifier(notifier);
     actionExecutor.setTelegramNotifier(notifier);
-    executor.setPendingActionNotifier((action, projectName, agentName) =>
-      telegramBot!.notifyPendingAction(action, projectName, agentName),
-    );
+    const pendingActionNotifier = (action: Parameters<TelegramBot["notifyPendingAction"]>[0], projectName: string, agentName: string) =>
+      telegramBot!.notifyPendingAction(action, projectName, agentName);
+    executor.setPendingActionNotifier(pendingActionNotifier);
+    managerListener.setPendingActionNotifier(pendingActionNotifier);
     telegramBot.start();
   } else {
     logger.info("worker", "TELEGRAM_BOT_TOKEN not set — Telegram bot disabled");

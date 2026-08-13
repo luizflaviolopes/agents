@@ -67,6 +67,11 @@ agents.
   [docs/COMMS-AGENTS.md](docs/COMMS-AGENTS.md): triage agents that read your
   Slack/Gmail via MCP, draft replies in your voice, and propose every
   outbound message for your approval before anything is sent.
+- **Project management agents (Notion)** —
+  [docs/PROJECT-MANAGEMENT-AGENTS.md](docs/PROJECT-MANAGEMENT-AGENTS.md): a
+  Project Manager agent that reads your Notion boards, sends a morning
+  digest (web + Telegram), and edits your roadmap with you in chat — plus a
+  Librarian agent that curates everything the fleet knows.
 
 ## Repository layout
 
@@ -102,15 +107,19 @@ any plan.
 
 ### 2. Apply the database migrations
 
-There are two migrations in `supabase/migrations/` — apply **both**, in
-order:
+Apply **all** migrations in `supabase/migrations/`, in filename order:
 
-- `0001_init.sql` — tables, the `claim_next_task` RPC, triggers, Realtime
-  publication.
+- `0001_init.sql` — core tables, the `claim_next_task` RPC, triggers,
+  Realtime publication.
 - `0002_backend_authz.sql` — moves authorization to the backend: disables
   RLS, drops all policies, and revokes all table/function privileges from
   the `anon`/`authenticated` roles (the browser can no longer query the
   database directly; all data access goes through the web app's API routes).
+- `0003_automations.sql` — schedules, approval-gated pending actions,
+  agent knowledge docs, per-project integrations.
+- `0004_cost_tracking.sql` — token/cost columns on `task_runs`.
+- `0005_pm_librarian.sql` — daily schedules, per-agent chat threads,
+  project-scoped knowledge with provenance, the librarian role.
 
 **Option A — Supabase CLI (recommended):**
 
@@ -121,8 +130,8 @@ npx supabase db push
 ```
 
 **Option B — SQL editor:** open your project's *SQL Editor* in the Supabase
-dashboard, paste the contents of `supabase/migrations/0001_init.sql`, run
-it, then do the same with `supabase/migrations/0002_backend_authz.sql`.
+dashboard and run each migration file's contents, one at a time, in
+filename order (`0001` → `0005`).
 
 ### 3. Get your Supabase keys
 

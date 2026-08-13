@@ -1,18 +1,34 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { ScheduleRow } from "@agent-fleet/shared";
 import { logger } from "../lib/logger.js";
+import { nextDailyOccurrence } from "./daily.js";
 
 const TICK_INTERVAL_MS = 30_000;
 const MAX_DUE_PER_TICK = 50;
+/** 'daily' recomputation starts from now + 1 minute so a fired schedule never re-matches the same minute. */
+const DAILY_RECOMPUTE_SLACK_MS = 60_000;
+/** Fallback interval when a schedule row is malformed (constraint should prevent this). */
+const FALLBACK_INTERVAL_MINUTES = 60;
+const FALLBACK_DAILY_RETRY_MS = 24 * 60 * 60 * 1000;
 
 /**
  * Fires recurring task templates (the `schedules` table).
  *
  * Every 30s: for each enabled schedule whose next_run_at is due, insert a
  * queued task (source 'schedule') for the schedule's agent and advance
- * next_run_at by interval_minutes. If an identical schedule-created task is
- * still open (queued/in_progress), the insert is skipped — next_run_at is
- * still advanced so a slow task never causes a pile-up of duplicates.
+ * next_run_at according to the schedule's kind:
+ * - 'interval': now + interval_minutes.
+ * - 'daily': the next occurrence of run_at_time in the schedule's IANA
+ *   timezone on an allowed weekday (Intl-based tz math, see daily.ts).
+ *
+ * The stored next_run_at is only the *due trigger* — on fire the next value
+ * is always recomputed from the kind's rule, so rows inserted/updated with
+ * next_run_at in the past (or the column default now()) self-correct on the
+ * first tick.
+ *
+ * If an identical schedule-created task is still open (queued/in_progress),
+ * the insert is skipped — next_run_at is still advanced so a slow task never
+ * causes a pile-up of duplicates.
  *
  * Defensive: every failure is caught and logged; the loop never throws.
  */
@@ -67,9 +83,7 @@ export class Scheduler {
   private async fire(schedule: ScheduleRow): Promise<void> {
     try {
       const now = new Date();
-      const nextRunAt = new Date(
-        now.getTime() + schedule.interval_minutes * 60_000,
-      ).toISOString();
+      const nextRunAt = this.computeNextRunAt(schedule, now);
 
       // Pile-up guard: skip when the previous schedule-created task for this
       // agent + title is still open.
@@ -130,5 +144,33 @@ export class Scheduler {
     } catch (err) {
       logger.error("scheduler", `schedule ${schedule.id} ("${schedule.name}") crashed`, err);
     }
+  }
+
+  /**
+   * Recomputes next_run_at from the schedule's kind. Never throws — malformed
+   * rows (bad timezone/time) fall back to a 24h retry so a broken schedule
+   * can't hot-loop the tick.
+   */
+  private computeNextRunAt(schedule: ScheduleRow, now: Date): string {
+    if (schedule.kind === "daily") {
+      try {
+        if (!schedule.run_at_time) throw new Error("daily schedule has no run_at_time");
+        return nextDailyOccurrence(
+          schedule.run_at_time,
+          schedule.weekdays ?? [],
+          schedule.timezone || "UTC",
+          new Date(now.getTime() + DAILY_RECOMPUTE_SLACK_MS),
+        ).toISOString();
+      } catch (err) {
+        logger.error(
+          "scheduler",
+          `schedule ${schedule.id} ("${schedule.name}"): daily next_run_at computation failed (run_at_time=${schedule.run_at_time}, timezone=${schedule.timezone}) — retrying in 24h`,
+          err,
+        );
+        return new Date(now.getTime() + FALLBACK_DAILY_RETRY_MS).toISOString();
+      }
+    }
+    const minutes = schedule.interval_minutes ?? FALLBACK_INTERVAL_MINUTES;
+    return new Date(now.getTime() + minutes * 60_000).toISOString();
   }
 }
