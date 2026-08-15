@@ -45,8 +45,11 @@ COPY packages/shared/package.json packages/shared/
 # dependencies, i.e. @agent-fleet/shared). Prefer a reproducible frozen
 # install; fall back to a plain install if the lockfile has not been
 # committed yet (see README — commit pnpm-lock.yaml for reproducible builds).
-RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store \
-    pnpm config set store-dir /pnpm/store && \
+# NOTE: no `--mount=type=cache` for the pnpm store — the production host builds
+# with the legacy (non-BuildKit) builder, which rejects cache mounts. The store
+# lives in the image layer instead; the layer itself is still cached, so a build
+# that doesn't touch the manifests reuses it.
+RUN pnpm config set store-dir /pnpm/store && \
     if [ -f pnpm-lock.yaml ]; then \
       pnpm install --frozen-lockfile --filter "@agent-fleet/web..."; \
     else \
@@ -71,8 +74,7 @@ RUN pnpm --filter @agent-fleet/web build
 # production dependencies; workspace deps (@agent-fleet/shared) are packed in
 # as real packages. Assumes apps/web/package.json has no restrictive "files"
 # field, so next.config.*, public/, etc. are all included by default rules.
-RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store \
-    pnpm --filter @agent-fleet/web deploy --prod /out
+RUN pnpm --filter @agent-fleet/web deploy --prod /out
 # .next/ is a build artifact (gitignored / not packed) — copy the freshly
 # built one into the bundle explicitly so packing rules can't drop it.
 RUN rm -rf /out/.next && cp -R apps/web/.next /out/.next

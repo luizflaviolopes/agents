@@ -1,0 +1,80 @@
+name: Deploy to Production
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch: {}
+
+concurrency:
+  group: deploy-agents
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Deploy to server
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      # The deploy runs two Docker builds (Next.js + worker) on the production
+      # VPS, which saturates the box for a few minutes; during that window sshd
+      # is slow to accept and the default 30s connection timeout expires
+      # ("dial tcp :22: i/o timeout"). We give a generous 120s connection
+      # timeout and retry once after a wait, so a transient load/unreachability
+      # window self-heals within the same run. The remote script is idempotent
+      # (git reset --hard + bash deploy.sh), so retrying is safe.
+      #
+      # The server's local clone is fetched from a token-authenticated URL built
+      # from the run's GITHUB_TOKEN (forwarded via envs, masked in logs) rather
+      # than relying on the server's own git credentials.
+      - name: Deploy via SSH (attempt 1)
+        id: deploy1
+        continue-on-error: true
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          timeout: 120s
+          command_timeout: 25m
+          envs: GH_TOKEN
+          script: |
+            set -e
+            cd /home/ubuntu/agents
+            # Sync working tree to the pushed commit BEFORE running deploy.sh,
+            # so the tracked script isn't rewritten mid-run. .env is untracked
+            # and survives the reset.
+            git fetch --prune "https://x-access-token:${GH_TOKEN}@github.com/luizflaviolopes/agents.git" "+refs/heads/master:refs/remotes/origin/master"
+            git checkout -B master origin/master
+            git reset --hard origin/master
+            bash deploy.sh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Wait before retry
+        if: steps.deploy1.outcome == 'failure'
+        run: |
+          echo "First SSH attempt failed (likely transient sshd unavailability under build load). Waiting 60s before retry..."
+          sleep 60
+
+      - name: Deploy via SSH (attempt 2)
+        if: steps.deploy1.outcome == 'failure'
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          timeout: 120s
+          command_timeout: 25m
+          envs: GH_TOKEN
+          script: |
+            set -e
+            cd /home/ubuntu/agents
+            git fetch --prune "https://x-access-token:${GH_TOKEN}@github.com/luizflaviolopes/agents.git" "+refs/heads/master:refs/remotes/origin/master"
+            git checkout -B master origin/master
+            git reset --hard origin/master
+            bash deploy.sh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

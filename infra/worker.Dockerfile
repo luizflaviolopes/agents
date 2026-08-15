@@ -39,8 +39,11 @@ COPY pnpm-lock.yaml* ./
 COPY apps/worker/package.json apps/worker/
 COPY packages/shared/package.json packages/shared/
 # Install the worker plus its workspace dependencies (@agent-fleet/shared).
-RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store \
-    pnpm config set store-dir /pnpm/store && \
+# NOTE: no `--mount=type=cache` for the pnpm store — the production host builds
+# with the legacy (non-BuildKit) builder, which rejects cache mounts. The store
+# lives in the image layer instead; the layer itself is still cached, so a build
+# that doesn't touch the manifests reuses it.
+RUN pnpm config set store-dir /pnpm/store && \
     if [ -f pnpm-lock.yaml ]; then \
       pnpm install --frozen-lockfile --filter "@agent-fleet/worker..."; \
     else \
@@ -60,8 +63,7 @@ RUN pnpm --filter @agent-fleet/worker build
 # Self-contained production bundle: worker package + production node_modules
 # (including @anthropic-ai/claude-agent-sdk, tsx, and the packed
 # @agent-fleet/shared — whose raw .ts sources tsx executes directly).
-RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store \
-    pnpm --filter @agent-fleet/worker deploy --prod /out
+RUN pnpm --filter @agent-fleet/worker deploy --prod /out
 # Make sure the worker's TypeScript sources are present in the bundle — the
 # runtime runs tsx over src/, not a compiled dist/.
 RUN rm -rf /out/src && cp -R apps/worker/src /out/src
