@@ -47,7 +47,7 @@ export function TabNav({ projectId }: { projectId: string }) {
   const base = `/projects/${projectId}`;
 
   return (
-    <nav className="mt-4 flex gap-1">
+    <nav className="no-scrollbar -mx-4 mt-4 flex gap-1 overflow-x-auto px-4 sm:-mx-8 sm:px-8">
       {TABS.map((tab) => {
         const href = tab.segment ? `${base}/${tab.segment}` : base;
         const active = tab.segment
@@ -58,7 +58,7 @@ export function TabNav({ projectId }: { projectId: string }) {
             key={tab.label}
             href={href}
             className={cn(
-              "relative rounded-t-md px-3 pb-3 pt-1.5 text-sm font-medium transition-colors",
+              "relative shrink-0 whitespace-nowrap rounded-t-md px-3 pb-3 pt-1.5 text-sm font-medium transition-colors",
               active
                 ? "text-foreground after:absolute after:inset-x-1 after:bottom-0 after:h-0.5 after:rounded-full after:bg-primary"
                 : "text-muted-foreground hover:text-foreground",

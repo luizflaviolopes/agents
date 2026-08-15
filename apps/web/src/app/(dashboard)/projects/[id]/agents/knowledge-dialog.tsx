@@ -155,7 +155,7 @@ export function KnowledgeDialog({
 
           {editor ? (
             <form onSubmit={save} className="space-y-4">
-              <div className="grid grid-cols-[1fr_10rem] gap-3">
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-[1fr_10rem]">
                 <div className="space-y-2">
                   <Label htmlFor="doc-title">Title</Label>
                   <Input

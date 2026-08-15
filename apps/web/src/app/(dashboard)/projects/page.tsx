@@ -24,7 +24,7 @@ export default async function ProjectsPage({
     .order("created_at", { ascending: false });
 
   return (
-    <div className="mx-auto max-w-6xl px-8 py-8">
+    <div className="mx-auto max-w-6xl px-4 py-6 sm:px-8 sm:py-8">
       <ProjectsGrid
         initialProjects={(projects ?? []) as Project[]}
         openNewOnMount={openNew === "1"}

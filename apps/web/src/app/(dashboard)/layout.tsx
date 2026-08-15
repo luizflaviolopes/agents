@@ -23,13 +23,13 @@ export default async function DashboardLayout({
   ]);
 
   return (
-    <div className="flex min-h-screen">
+    <div className="flex h-dvh flex-col md:flex-row">
       <Sidebar
         projects={(projects ?? []) as Project[]}
         email={user.email ?? ""}
         displayName={(profile as Profile | null)?.display_name ?? null}
       />
-      <main className="min-w-0 flex-1">{children}</main>
+      <main className="min-h-0 min-w-0 flex-1 overflow-y-auto">{children}</main>
     </div>
   );
 }

@@ -2,8 +2,8 @@ import { Skeleton } from "@/components/ui/skeleton";
 
 export default function SchedulesLoading() {
   return (
-    <div className="mx-auto max-w-5xl px-8 py-6">
-      <div className="mb-5 flex items-center justify-between">
+    <div className="mx-auto max-w-5xl px-4 py-4 sm:px-8 sm:py-6">
+      <div className="mb-5 flex items-center justify-between gap-3">
         <Skeleton className="h-4 w-64" />
         <Skeleton className="h-8 w-32" />
       </div>

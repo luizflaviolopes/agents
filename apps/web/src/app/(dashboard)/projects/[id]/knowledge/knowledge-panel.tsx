@@ -113,8 +113,8 @@ export function KnowledgePanel({ projectId }: { projectId: string }) {
   }
 
   return (
-    <div className="mx-auto max-w-3xl px-8 py-6">
-      <div className="mb-5 flex items-center justify-between">
+    <div className="mx-auto max-w-3xl px-4 py-4 sm:px-8 sm:py-6">
+      <div className="mb-5 flex items-center justify-between gap-3">
         <p className="text-sm text-muted-foreground">
           Project knowledge — injected into every agent&apos;s system prompt.
           The librarian curates these; you can edit them here too.

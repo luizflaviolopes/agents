@@ -77,10 +77,10 @@ export function WorkspacesPanel({ projectId }: { projectId: string }) {
   }
 
   return (
-    <div className="mx-auto max-w-5xl px-8 py-6">
+    <div className="mx-auto max-w-5xl px-4 py-4 sm:px-8 sm:py-6">
       <IntegrationsCard projectId={projectId} />
 
-      <div className="mb-5 flex items-center justify-between">
+      <div className="mb-5 flex items-center justify-between gap-3">
         <p className="text-sm text-muted-foreground">
           Workspaces are folders of cloned repositories on the worker&apos;s
           disk.

@@ -35,7 +35,7 @@ export function ActivityFeed({ projectId }: { projectId: string }) {
   );
 
   return (
-    <div className="mx-auto max-w-3xl px-8 py-6">
+    <div className="mx-auto max-w-3xl px-4 py-4 sm:px-8 sm:py-6">
       <CostsCard projectId={projectId} />
 
       <p className="mb-5 text-sm text-muted-foreground">

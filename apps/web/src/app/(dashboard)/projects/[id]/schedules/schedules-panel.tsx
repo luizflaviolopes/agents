@@ -115,8 +115,8 @@ export function SchedulesPanel({
   }
 
   return (
-    <div className="mx-auto max-w-5xl px-8 py-6">
-      <div className="mb-5 flex items-center justify-between">
+    <div className="mx-auto max-w-5xl px-4 py-4 sm:px-8 sm:py-6">
+      <div className="mb-5 flex items-center justify-between gap-3">
         <p className="text-sm text-muted-foreground">
           Recurring tasks — the worker queues each one for its agent on the
           interval or daily slot.

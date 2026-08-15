@@ -35,7 +35,7 @@ function Dialog({ open, onOpenChange, children }: DialogProps) {
 
   return createPortal(
     <div
-      className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/70 p-4 pt-[8vh] backdrop-blur-sm"
+      className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/70 p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] pt-[max(4dvh,env(safe-area-inset-top))] backdrop-blur-sm sm:p-4 sm:pt-[8vh]"
       onMouseDown={(e) => {
         if (e.target === e.currentTarget) onOpenChange(false);
       }}
@@ -65,7 +65,7 @@ function DialogContent({
   return (
     <div
       className={cn(
-        "relative w-full max-w-lg rounded-xl border border-border bg-popover p-6 shadow-2xl",
+        "relative w-full max-w-lg rounded-xl border border-border bg-popover p-4 shadow-2xl sm:p-6",
         className,
       )}
     >
@@ -120,7 +120,10 @@ function DialogFooter({
 }: React.HTMLAttributes<HTMLDivElement>) {
   return (
     <div
-      className={cn("mt-6 flex justify-end gap-2", className)}
+      className={cn(
+        "mt-6 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end",
+        className,
+      )}
       {...props}
     />
   );

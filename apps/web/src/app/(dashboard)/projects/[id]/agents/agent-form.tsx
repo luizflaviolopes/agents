@@ -316,7 +316,7 @@ export function AgentForm({
                 key={index}
                 className="space-y-2 rounded-lg border border-border p-3"
               >
-                <div className="grid grid-cols-[1fr_8rem_auto] items-end gap-2">
+                <div className="grid grid-cols-[1fr_6rem_auto] items-end gap-2 sm:grid-cols-[1fr_8rem_auto]">
                   <div className="space-y-1">
                     <Label className="text-xs text-muted-foreground">Name</Label>
                     <Input

@@ -2,8 +2,8 @@ import { Skeleton } from "@/components/ui/skeleton";
 
 export default function BoardLoading() {
   return (
-    <div className="px-8 py-6">
-      <div className="mb-5 flex items-center justify-between">
+    <div className="px-4 py-4 sm:px-8 sm:py-6">
+      <div className="mb-5 flex items-center justify-between gap-3">
         <Skeleton className="h-4 w-48" />
         <Skeleton className="h-8 w-28" />
       </div>

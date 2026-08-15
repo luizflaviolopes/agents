@@ -94,3 +94,31 @@ body {
   scrollbar-width: thin;
   scrollbar-color: var(--border) transparent;
 }
+
+/* Mobile: avoid pull-to-refresh / scroll chaining fighting inner panes */
+html,
+body {
+  overscroll-behavior-y: none;
+}
+
+@media (pointer: coarse) {
+  /* Comfortable tap targets for form controls on touch screens */
+  input,
+  select,
+  textarea,
+  button {
+    touch-action: manipulation;
+  }
+}
+
+@utility no-scrollbar {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+  &::-webkit-scrollbar {
+    display: none;
+  }
+}
+
+@utility pb-safe {
+  padding-bottom: max(1rem, env(safe-area-inset-bottom));
+}

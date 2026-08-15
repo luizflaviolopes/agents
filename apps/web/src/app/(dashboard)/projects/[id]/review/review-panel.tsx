@@ -93,7 +93,7 @@ export function ReviewPanel({ projectId }: { projectId: string }) {
   const decided = actions.filter((a) => a.status !== "pending").slice(0, 30);
 
   return (
-    <div className="mx-auto max-w-3xl px-8 py-6">
+    <div className="mx-auto max-w-3xl px-4 py-4 sm:px-8 sm:py-6">
       <div className="mb-5">
         <p className="text-sm text-muted-foreground">
           Agents never send anything directly — every outbound Slack message

@@ -95,8 +95,8 @@ export function Board({
   const visibleTasks = (tasks ?? []).filter((t) => t.status !== "cancelled");
 
   return (
-    <div className="flex h-full flex-col px-8 py-6">
-      <div className="mb-5 flex items-center justify-between">
+    <div className="flex h-full flex-col px-4 py-4 sm:px-8 sm:py-6">
+      <div className="mb-4 flex items-center justify-between gap-3 sm:mb-5">
         <p className="text-sm text-muted-foreground">
           {visibleTasks.length} task{visibleTasks.length === 1 ? "" : "s"} on
           the board — refreshes automatically
@@ -108,7 +108,7 @@ export function Board({
       </div>
 
       {loading ? (
-        <div className="grid flex-1 grid-cols-1 items-start gap-4 md:grid-cols-3 xl:grid-cols-5">
+        <div className="grid flex-1 grid-cols-2 items-start gap-3 sm:gap-4 md:grid-cols-3 xl:grid-cols-5">
           {COLUMNS.map((column) => (
             <Skeleton key={column.status} className="h-40" />
           ))}
@@ -126,7 +126,8 @@ export function Board({
           }
         />
       ) : (
-        <div className="grid flex-1 grid-cols-1 items-start gap-4 md:grid-cols-3 xl:grid-cols-5">
+        // Mobile: one horizontally-snapping row of columns; md+: a grid.
+        <div className="no-scrollbar -mx-4 flex flex-1 snap-x snap-mandatory items-start gap-3 overflow-x-auto px-4 sm:-mx-8 sm:px-8 md:mx-0 md:grid md:snap-none md:grid-cols-3 md:gap-4 md:overflow-visible md:px-0 xl:grid-cols-5">
           {COLUMNS.map((column) => {
             const columnTasks = visibleTasks
               .filter((t) => t.status === column.status)
@@ -138,7 +139,7 @@ export function Board({
             return (
               <div
                 key={column.status}
-                className="flex min-h-[16rem] flex-col rounded-lg border border-border/60 bg-card/40"
+                className="flex min-h-[16rem] w-[80vw] max-w-72 shrink-0 snap-start flex-col rounded-lg border border-border/60 bg-card/40 md:w-auto md:max-w-none"
               >
                 <div className="flex items-center gap-2 px-3 py-2.5">
                   <span className={cn("size-1.5 rounded-full", column.dot)} />

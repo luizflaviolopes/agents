@@ -94,7 +94,8 @@ export function CostsCard({ projectId }: { projectId: string }) {
                 No runs in this period.
               </p>
             ) : (
-              <table className="mt-3 w-full text-xs">
+              <div className="mt-3 overflow-x-auto">
+                <table className="w-full min-w-[22rem] text-xs">
                 <thead>
                   <tr className="border-b border-border text-left text-muted-foreground">
                     <th className="py-1.5 pr-2 font-medium">Agent</th>
@@ -133,7 +134,8 @@ export function CostsCard({ projectId }: { projectId: string }) {
                     </tr>
                   ))}
                 </tbody>
-              </table>
+                </table>
+              </div>
             )}
           </>
         )}

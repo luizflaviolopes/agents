@@ -34,7 +34,7 @@ export function ChatPanel({
   const threadAgent = threadAgents.find((a) => a.id === threadAgentId) ?? null;
 
   return (
-    <div className="mx-auto flex h-full max-w-3xl flex-col px-6">
+    <div className="mx-auto flex h-full max-w-3xl flex-col px-4 sm:px-6">
       <div className="flex shrink-0 flex-wrap gap-1.5 border-b border-border py-3">
         <button
           type="button"
@@ -243,7 +243,7 @@ function ChatThread({
         <div ref={bottomRef} />
       </div>
 
-      <div className="shrink-0 border-t border-border py-4">
+      <div className="shrink-0 border-t border-border pb-safe pt-3 sm:py-4">
         {error && <p className="mb-2 text-sm text-destructive">{error}</p>}
         <div className="flex items-end gap-2">
           <Textarea

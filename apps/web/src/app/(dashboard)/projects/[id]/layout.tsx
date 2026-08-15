@@ -17,8 +17,8 @@ export default async function ProjectLayout({
   if (!project) notFound();
 
   return (
-    <div className="flex h-screen flex-col">
-      <header className="shrink-0 border-b border-border px-8 pt-6">
+    <div className="flex h-full flex-col">
+      <header className="shrink-0 border-b border-border px-4 pt-4 sm:px-8 sm:pt-6">
         <div className="flex items-baseline gap-3">
           <h1 className="text-xl font-semibold tracking-tight">
             {project.name}
