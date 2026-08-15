@@ -110,21 +110,69 @@ docker run -d \
   "$WORKER_IMAGE"
 
 # --- verify ------------------------------------------------------------------
-echo "==> waiting for web readiness ..."
+# Three separate checks, because one end-to-end curl cannot tell the failure
+# modes apart: Traefik answers unmatched hosts with its OWN 404, so a crash-
+# looping app and a mis-labelled router look identical from outside ("HTTP 404").
+#
+#   1) the container stays up            (catches crash loops)
+#   2) the app answers on its own port   (proves the app actually serves)
+#   3) Traefik registered the router     (proves the routing layer sees it)
+
+echo "==> [1/3] waiting for web container to stay up ..."
+ok=""
+for i in $(seq 1 30); do
+  state="$(docker inspect "$WEB_CONTAINER" --format '{{.State.Status}}' 2>/dev/null || echo missing)"
+  restarts="$(docker inspect "$WEB_CONTAINER" --format '{{.RestartCount}}' 2>/dev/null || echo 0)"
+  if [ "$restarts" -gt 0 ] || [ "$state" = "exited" ]; then
+    echo "==> FAILED — web container is '${state}' after ${restarts} restart(s): it is crash-looping." >&2
+    dump_diagnostics 1 "$LINENO" "web container crash-looped during readiness check"
+    exit 1
+  fi
+  [ "$state" = "running" ] && ok=1 && break
+  sleep 1
+done
+if [ -z "$ok" ]; then
+  echo "==> FAILED — web container never reached 'running'." >&2
+  dump_diagnostics 1 "$LINENO" "web container did not reach running state"
+  exit 1
+fi
+
+echo "==> [2/3] waiting for the app to answer on the container network ..."
+WEB_IP="$(docker inspect "$WEB_CONTAINER" --format "{{(index .NetworkSettings.Networks \"${NETWORK}\").IPAddress}}")"
 ok=""
 for i in $(seq 1 90); do
-  code="$(curl -sk -m 5 -o /dev/null -w '%{http_code}' -H "Host: ${DOMAIN}" https://127.0.0.1/ || true)"
-  # Next.js serves the app (/ redirects to /login when signed out); any
-  # non-5xx/000 response means the server is up and Traefik is routing to it.
+  # / redirects to /login when signed out; any non-5xx from the app means it is up.
+  code="$(docker run --rm --network "$NETWORK" curlimages/curl:latest \
+            -s -m 5 -o /dev/null -w '%{http_code}' "http://${WEB_IP}:3000/" 2>/dev/null || true)"
   if [ -n "$code" ] && [ "$code" != "000" ] && [ "$code" -lt 500 ]; then
-    ok=1; echo "==> web up after ${i}s (HTTP ${code})"; break
+    ok=1; echo "==> app responding after ${i}s (HTTP ${code})"; break
+  fi
+  # A restart mid-poll means it started then died — fail fast rather than wait.
+  if [ "$(docker inspect "$WEB_CONTAINER" --format '{{.RestartCount}}' 2>/dev/null || echo 0)" -gt 0 ]; then
+    echo "==> FAILED — web container restarted while waiting for a response." >&2
+    dump_diagnostics 1 "$LINENO" "web container restarted during app readiness check"
+    exit 1
   fi
   sleep 1
 done
-
 if [ -z "$ok" ]; then
-  echo "==> FAILED — web not responding after 90s." >&2
-  dump_diagnostics 1 "$LINENO" "web readiness check timed out after 90s"
+  echo "==> FAILED — app did not respond on ${WEB_IP}:3000 after 90s." >&2
+  dump_diagnostics 1 "$LINENO" "app-level readiness check timed out"
+  exit 1
+fi
+
+echo "==> [3/3] confirming Traefik registered the '${ROUTER}' router ..."
+ok=""
+for i in $(seq 1 30); do
+  if curl -s -m 5 http://127.0.0.1:8080/api/http/routers 2>/dev/null | grep -q "\"${ROUTER}@docker\""; then
+    ok=1; echo "==> router ${ROUTER}@docker registered after ${i}s"; break
+  fi
+  sleep 1
+done
+if [ -z "$ok" ]; then
+  echo "==> FAILED — Traefik never registered router '${ROUTER}@docker'. The app is up" >&2
+  echo "    but unreachable via ${DOMAIN}; check the traefik.* labels and network." >&2
+  dump_diagnostics 1 "$LINENO" "traefik router registration check timed out"
   exit 1
 fi
 

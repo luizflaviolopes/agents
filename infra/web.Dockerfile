@@ -78,6 +78,19 @@ RUN pnpm --filter @agent-fleet/web deploy --prod /out
 # .next/ is a build artifact (gitignored / not packed) — copy the freshly
 # built one into the bundle explicitly so packing rules can't drop it.
 RUN rm -rf /out/.next && cp -R apps/web/.next /out/.next
+# `next start` re-loads next.config.* at RUNTIME, and parsing a .ts config
+# requires the `typescript` package — which is a devDependency that
+# `pnpm deploy --prod` correctly strips. Next then tries to auto-install it with
+# yarn, which fails in the container ("@agent-fleet/shared: Not found" — the
+# workspace package isn't on the public registry) and the server crash-loops.
+#
+# Everything next.config.ts does is build-time only: `transpilePackages` affects
+# compilation, the `env` block is inlined into the bundle during `next build`,
+# and the root-.env dotenv load has no meaning here (runtime env arrives via
+# --env-file, and ../../.env doesn't exist in this image). So the production
+# bundle ships an equivalent plain-JS config with no TypeScript dependency.
+RUN rm -f /out/next.config.ts && \
+    printf '/** @type {import("next").NextConfig} */\nmodule.exports = { transpilePackages: ["@agent-fleet/shared"] };\n' > /out/next.config.js
 
 # ---- runtime: minimal image, non-root ---------------------------------------
 FROM node:22-slim AS runtime
