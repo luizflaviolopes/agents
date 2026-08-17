@@ -36,6 +36,15 @@ const TOOL_RESULT_MAX_CHARS = 4_000;
 const RESULT_SUMMARY_MAX_CHARS = 1_500;
 const MAX_TURNS = 100;
 
+/** Task fields for a triggered sweep — see "Post-run knowledge sweeps" in ARCHITECTURE.md. */
+const SWEEP_TASK_TITLE = "Knowledge sweep";
+const SWEEP_TASK_DESCRIPTION =
+  "Run your sweep: call read_project_activity, extract durable facts with provenance, merge them " +
+  "into the canonical docs, and do your consolidation pass. Report facts recorded / consolidated / " +
+  "ignored, per your instructions.";
+/** Sweeps yield to real work — claim_next_task orders by priority desc. */
+const SWEEP_PRIORITY = -10;
+
 /**
  * Usage totals extracted from the SDK result message, written to the
  * task_runs cost columns (migration 0004). Null when no result arrived.
@@ -68,6 +77,12 @@ export class TaskExecutor {
      * it before resuming (see buildFleetServer in session.ts).
      */
     private readonly slots: Semaphore,
+    /**
+     * Whether a finished run enqueues a knowledge sweep
+     * (KNOWLEDGE_SWEEP_AFTER_RUNS). When false, the librarian only sweeps on
+     * its schedule — the pre-0006 behavior.
+     */
+    private readonly sweepAfterRuns: boolean = true,
   ) {}
 
   /** Hook registered by the Telegram bot (if configured). */
@@ -176,6 +191,9 @@ export class TaskExecutor {
         // sessions never advance it.
         if (agent.role === "librarian") {
           await this.advanceActivityCursor(agent, run.started_at);
+          await this.chainSweepIfUnswept(task, agent, run.started_at);
+        } else {
+          await this.triggerKnowledgeSweep(task, agent);
         }
       }
     } catch (err) {
@@ -384,6 +402,116 @@ export class TaskExecutor {
     } catch (err) {
       logger.error("executor", `failed to advance activity_cursor for librarian ${agent.id}`, err);
     }
+  }
+
+  // ------------------------------------------------ post-run knowledge sweeps
+
+  /**
+   * Enqueues a knowledge sweep after a successful NON-librarian run, so facts
+   * from the run reach the docs in minutes instead of waiting for the daily
+   * schedule. Coalesced by enqueueSweep — a burst of runs produces one sweep,
+   * not one per run. Never called for librarian runs (that would loop); their
+   * continuation path is chainSweepIfUnswept.
+   *
+   * Failures are logged, never thrown: a sweep that cannot be queued must not
+   * affect the task that just succeeded.
+   */
+  private async triggerKnowledgeSweep(task: Task, agent: Agent): Promise<void> {
+    if (!this.sweepAfterRuns) return;
+    try {
+      const librarian = await findLibrarian(this.supabase, task.project_id);
+      if (!librarian) return; // project has no librarian — nothing curates knowledge
+      await this.enqueueSweep(task.project_id, librarian, `"${task.title}" finished (${agent.name})`);
+    } catch (err) {
+      logger.error("executor", `failed to trigger a knowledge sweep for project ${task.project_id}`, err);
+    }
+  }
+
+  /**
+   * Follow-up sweep after a librarian run. Two facts make this the right place
+   * for it: the cursor now sits at this run's start time, so anything that
+   * finished *during* the run is unswept; and triggers that fired while it ran
+   * deliberately did not enqueue (that is what keeps sweeps from overlapping
+   * and racing on the same docs). So the run that just finished is responsible
+   * for queueing the next one when it left work behind.
+   *
+   * Excludes the librarian's own tasks, so a sweep can never re-trigger itself.
+   */
+  private async chainSweepIfUnswept(task: Task, librarian: Agent, runStartedAt: string): Promise<void> {
+    if (!this.sweepAfterRuns) return;
+    try {
+      const { data, error } = await this.supabase
+        .from("tasks")
+        .select("id")
+        .eq("project_id", task.project_id)
+        .in("status", ["done", "review"])
+        .neq("agent_id", librarian.id)
+        .gt("finished_at", runStartedAt)
+        .limit(1);
+      if (error) {
+        logger.error(
+          "executor",
+          `failed to check for unswept activity in project ${task.project_id}: ${error.message}`,
+        );
+        return;
+      }
+      if ((data ?? []).length === 0) return;
+      await this.enqueueSweep(task.project_id, librarian, "activity finished while the previous sweep ran");
+    } catch (err) {
+      logger.error("executor", `failed to chain a knowledge sweep for project ${task.project_id}`, err);
+    }
+  }
+
+  /**
+   * Inserts one sweep task for the project's librarian — unless a librarian
+   * task is already **queued** (it has not read its activity window yet, so it
+   * will cover this run too) or already **in progress** (letting a second sweep
+   * start alongside it would race: save_knowledge is a read-then-write with no
+   * version check, so the later write silently clobbers the earlier one. That
+   * run's chainSweepIfUnswept queues the follow-up instead).
+   *
+   * The check is not atomic across workers; the partial unique index
+   * `one_queued_sweep_per_project` (migration 0006) settles the race — the
+   * loser gets 23505 and treats it as "already queued".
+   */
+  private async enqueueSweep(projectId: string, librarian: Agent, reason: string): Promise<void> {
+    const { data, error } = await this.supabase
+      .from("tasks")
+      .select("id, status")
+      .eq("project_id", projectId)
+      .eq("agent_id", librarian.id)
+      .in("status", ["queued", "in_progress"])
+      .limit(1);
+    if (error) {
+      logger.error("executor", `failed to check open librarian tasks in project ${projectId}: ${error.message}`);
+      return;
+    }
+    const open = (data ?? [])[0] as { id: string; status: string } | undefined;
+    if (open) {
+      logger.debug(
+        "executor",
+        `knowledge sweep not queued for project ${projectId}: librarian task ${open.id} is ${open.status}`,
+      );
+      return;
+    }
+
+    const { error: insertError } = await this.supabase.from("tasks").insert({
+      project_id: projectId,
+      agent_id: librarian.id,
+      source: "trigger",
+      title: SWEEP_TASK_TITLE,
+      description: SWEEP_TASK_DESCRIPTION,
+      priority: SWEEP_PRIORITY,
+    });
+    if (insertError) {
+      if (insertError.code === "23505") {
+        logger.debug("executor", `knowledge sweep already queued for project ${projectId} (lost the insert race)`);
+        return;
+      }
+      logger.error("executor", `failed to queue a knowledge sweep for project ${projectId}: ${insertError.message}`);
+      return;
+    }
+    logger.info("executor", `knowledge sweep queued for project ${projectId}: ${reason}`);
   }
 
   /** Final task update + completion notification. */

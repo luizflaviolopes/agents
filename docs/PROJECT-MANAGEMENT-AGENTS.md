@@ -434,10 +434,18 @@ browser's; the examples use `America/Sao_Paulo`.
 | Task title | `Daily knowledge sweep` |
 | Task description | `Run your scheduled sweep: call read_project_activity, extract durable facts with provenance, merge them into the canonical docs, and do your consolidation pass. Report facts recorded / consolidated / ignored, per your instructions.` |
 
-If your project is chatty enough that end-of-day is too slow, use an
-interval schedule instead (kind `interval`, every `360` minutes) — the
-activity cursor makes overlapping sweeps harmless, each run only sees what's
-new.
+Since migration 0006 this schedule is a **backstop**, not the main path: the
+worker enqueues a sweep on its own whenever an agent run finishes, so facts
+normally land in the docs within minutes (see "Post-run knowledge sweeps" in
+ARCHITECTURE.md). Keep the daily schedule anyway — it catches what the
+trigger cannot see, chiefly chat messages that never produced a task, and it
+recovers the project if a sweep fails.
+
+If you want the librarian to sweep on a tighter clock as well, use an
+interval schedule (kind `interval`, every `360` minutes). Note that the
+worker will not run two sweeps for the same project at once — a sweep that
+would overlap a running one is not queued, and the running sweep queues the
+follow-up itself when it finishes.
 
 ---
 

@@ -17,7 +17,9 @@ export type TaskSource =
   | "manager"
   | "system"
   | "schedule"
-  | "agent";
+  | "agent"
+  /** Knowledge sweep enqueued by the worker's post-run trigger (0006). */
+  | "trigger";
 
 export type TaskStatus =
   | "queued"

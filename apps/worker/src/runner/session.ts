@@ -26,6 +26,14 @@ const ACTIVITY_MESSAGE_MAX_CHARS = 500;
 const ACTIVITY_RESULT_MAX_CHARS = 800;
 const ACTIVITY_DEFAULT_LOOKBACK_MS = 72 * 60 * 60 * 1000;
 
+/**
+ * Size ceiling for one knowledge doc. Docs are injected into EVERY agent's
+ * system prompt on every task run and every chat turn, so unchecked growth is
+ * paid for by the whole fleet on every future run. Hitting this ceiling is the
+ * signal to consolidate — which is already part of the librarian's job.
+ */
+const KNOWLEDGE_DOC_MAX_CHARS = 12_000;
+
 /** Sends a text to the project owner's linked Telegram chat. */
 export type TelegramNotifier = (projectId: string, text: string) => Promise<void>;
 
@@ -333,7 +341,8 @@ function buildSaveKnowledgeTool(ctx: FleetSessionContext) {
     "Create or update a knowledge document. scope 'project' = shared with every agent of this project; " +
       "scope 'agent' (requires agent_name) = private to that agent. mode 'create' makes a new doc, " +
       "'replace' overwrites the content of the doc with the same title, 'append' adds to it. " +
-      "Matching for replace/append is by exact title (case-insensitive) within the scope target.",
+      "Matching for replace/append is by exact title (case-insensitive) within the scope target. " +
+      `A single doc may not exceed ${KNOWLEDGE_DOC_MAX_CHARS} characters — consolidate rather than growing past it.`,
     {
       scope: z.enum(["project", "agent"]).describe("'project' = shared doc; 'agent' = a specific agent's doc"),
       agent_name: z.string().optional().describe("Target agent name (required when scope is 'agent')"),
@@ -378,6 +387,9 @@ function buildSaveKnowledgeTool(ctx: FleetSessionContext) {
             `Error: a doc titled "${existing.title}" already exists in ${scopeLabel} — use mode 'replace' or 'append' instead.`,
           );
         }
+        if (args.content.length > KNOWLEDGE_DOC_MAX_CHARS) {
+          return textResult(docTooLargeMessage(args.title, args.content.length));
+        }
         const { error } = await supabase.from("agent_knowledge").insert({
           agent_id: targetAgentId,
           project_id: args.scope === "project" ? projectId : null,
@@ -412,6 +424,9 @@ function buildSaveKnowledgeTool(ctx: FleetSessionContext) {
           : existing.content.trim().length > 0
             ? `${existing.content}\n\n${args.content}`
             : args.content;
+      if (newContent.length > KNOWLEDGE_DOC_MAX_CHARS) {
+        return textResult(docTooLargeMessage(existing.title, newContent.length));
+      }
 
       const { error } = await supabase
         .from("agent_knowledge")
@@ -427,6 +442,16 @@ function buildSaveKnowledgeTool(ctx: FleetSessionContext) {
       logger.info("fleet", `librarian ${agent.name}: ${args.mode}d knowledge doc "${existing.title}" (${scopeLabel})`);
       return textResult(`${verb} "${existing.title}" in ${scopeLabel} (kind '${existing.kind}' unchanged).`);
     },
+  );
+}
+
+/** Rejection text for a write over KNOWLEDGE_DOC_MAX_CHARS — it tells the librarian what to do instead. */
+function docTooLargeMessage(title: string, length: number): string {
+  return (
+    `Error: "${title}" would be ${length} characters, over the ${KNOWLEDGE_DOC_MAX_CHARS}-character ceiling ` +
+    `for one doc. Nothing was written. This doc sits in every agent's system prompt on every run, so it has ` +
+    `to stay tight: consolidate it instead — drop superseded facts, merge duplicates, retire stale entries — ` +
+    `and re-send the shorter revised doc with mode 'replace'.`
   );
 }
 
@@ -658,7 +683,9 @@ export async function loadProjectName(supabase: SupabaseClient, projectId: strin
 
 /**
  * Maps agents.mcp_servers (DB jsonb) to the Agent SDK's mcpServers option:
- * stdio → {command, args, env}; http/sse → {type, url}.
+ * stdio → {command, args, env}; http/sse → {type, url, headers}. The headers
+ * are what authenticate remote endpoints (e.g. "Authorization: Bearer <pat>"
+ * for GitHub's hosted MCP server — see docs/GITHUB-AGENT.md).
  */
 export function buildMcpServers(
   configs: McpServerConfig[],
@@ -682,7 +709,13 @@ export function buildMcpServers(
         logger.warn("fleet", `mcp server "${config.name}" is ${config.type} but has no url — skipped`);
         continue;
       }
-      servers[config.name] = { type: config.type, url: config.url };
+      servers[config.name] = {
+        type: config.type,
+        url: config.url,
+        ...(config.headers && Object.keys(config.headers).length > 0
+          ? { headers: config.headers }
+          : {}),
+      };
     } else {
       logger.warn("fleet", `mcp server "${config.name}" has unknown type — skipped`);
     }

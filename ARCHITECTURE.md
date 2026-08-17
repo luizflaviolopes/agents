@@ -37,7 +37,8 @@ unions live in `packages/shared/src/db-types.ts`. Keep both in sync.
   Notion half stays inert until the owner configures it.
 - **tasks** — the queue. `status`:
   `queued | in_progress | review | done | failed | cancelled`. `source`:
-  `web | telegram | manager | system`. `agent_id` is the assignee;
+  `web | telegram | manager | system | schedule | agent | trigger` (the last
+  three added by migrations 0003 and 0006). `agent_id` is the assignee;
   `parent_task_id` links manager-created subtasks; `priority` int (higher
   first); `result` holds the final text output. `updated_at` maintained by
   trigger.
@@ -344,10 +345,61 @@ Shared contract: `ScheduleKind`, updated `ScheduleRow` /
 (now includes `librarian`), `SCHEDULE_KINDS`, `WEEKDAY_LABELS` in
 `packages/shared/src/constants.ts`.
 
+## Post-run knowledge sweeps (migration 0006)
+
+Before this, a fact learned during a task run reached the knowledge docs only
+when the librarian's schedule next fired. The worker now enqueues a sweep as
+soon as a run finishes — **coalesced**, so a busy fleet produces one sweep per
+burst rather than one per run, and **serialized**, so two sweeps never edit the
+same docs at once (`save_knowledge` is a read-then-write with no version check:
+overlapping sweeps would silently clobber each other, and the cursor —
+advanced to the run's *start* time — can move backwards).
+
+`tasks.source` gains `'trigger'` (a sweep the worker queued). Sweep tasks are
+assigned to the project's librarian at `priority = -10`, so they always yield
+to real work in `claim_next_task`. Set `KNOWLEDGE_SWEEP_AFTER_RUNS=false` to
+switch the whole mechanism off and go back to schedule-only sweeping.
+
+The rules, all in `apps/worker/src/runner/executor.ts`:
+
+- **A successful non-librarian run** (`done` or `review`) calls
+  `triggerKnowledgeSweep`. Failed and crashed runs do not trigger — an error
+  message is not a durable fact, and a flapping task would sweep on every retry.
+- **`enqueueSweep` is the single coalescing gate.** It inserts nothing if a
+  librarian task for the project is already `queued` (that task has not read
+  its activity window yet, so it will cover this run too) or `in_progress`
+  (starting a second sweep alongside it is the race described above).
+- **A successful librarian run** calls `chainSweepIfUnswept` instead: the
+  cursor now sits at that run's start time, so any task that finished *during*
+  the sweep is unswept, and the triggers that fired meanwhile deliberately
+  queued nothing. The finishing run is therefore responsible for queueing the
+  follow-up. The query excludes the librarian's own tasks, so a sweep can never
+  re-trigger itself — the chain terminates as soon as activity stops.
+- **Races between workers** are settled by the partial unique index
+  `one_queued_sweep_per_project` — at most one queued `'trigger'` task per
+  project. The pre-insert check is not atomic; the loser gets `23505` and reads
+  it as "already queued". Index `tasks_project_agent_status_idx` serves the
+  check itself.
+
+The librarian's **daily schedule stays** as the backstop: the trigger only sees
+finished tasks, so chat messages that never produced a task still need it, and
+it recovers a project whose sweep failed.
+
+Related guard: `save_knowledge` rejects any write that would push one doc past
+`KNOWLEDGE_DOC_MAX_CHARS` (12k), telling the librarian to consolidate instead.
+Sweeping more often is only safe if docs do not grow without bound — every doc
+is injected into every agent's system prompt on every run, so growth is paid
+for fleet-wide, forever.
+
+Not covered: `ask_agent` forwarded-fact tasks (`source = 'agent'`) still insert
+directly, so one can overlap a sweep. That predates 0006; the trigger path
+never adds to it.
+
 ## Environment
 
 See `.env.example`: Supabase URL/keys, `ANTHROPIC_API_KEY`,
-`TELEGRAM_BOT_TOKEN`, `GITHUB_TOKEN`, `WORKSPACES_ROOT`, `WEB_URL`.
+`TELEGRAM_BOT_TOKEN`, `GITHUB_TOKEN`, `WORKSPACES_ROOT`, `WEB_URL`,
+`KNOWLEDGE_SWEEP_AFTER_RUNS`.
 `SUPABASE_SERVICE_ROLE_KEY` is required by **both** the web server (API
 routes / server components) and the worker — it must never reach the
 browser.

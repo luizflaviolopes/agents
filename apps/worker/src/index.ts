@@ -27,6 +27,8 @@ interface WorkerConfig {
   telegramBotToken?: string;
   githubToken?: string;
   workspacesRoot: string;
+  /** Enqueue a coalesced librarian knowledge sweep when a run finishes (0006). */
+  sweepAfterRuns: boolean;
 }
 
 function loadConfig(): WorkerConfig {
@@ -43,6 +45,9 @@ function loadConfig(): WorkerConfig {
     process.exit(1);
   }
 
+  // Post-run knowledge sweeps are on unless explicitly switched off.
+  const sweepFlag = (process.env.KNOWLEDGE_SWEEP_AFTER_RUNS ?? "").trim().toLowerCase();
+
   return {
     supabaseUrl,
     serviceRoleKey,
@@ -50,6 +55,7 @@ function loadConfig(): WorkerConfig {
     telegramBotToken: process.env.TELEGRAM_BOT_TOKEN || undefined,
     githubToken: process.env.GITHUB_TOKEN || undefined,
     workspacesRoot: path.resolve(process.cwd(), process.env.WORKSPACES_ROOT || "./workspaces-data"),
+    sweepAfterRuns: sweepFlag !== "false" && sweepFlag !== "0",
   };
 }
 
@@ -65,7 +71,10 @@ async function main(): Promise<void> {
   // Task slots shared between the poller and the executor's ask_agent tool
   // (which releases its slot while waiting on a child task).
   const taskSlots = new Semaphore(MAX_CONCURRENT_TASKS);
-  const executor = new TaskExecutor(supabase, workspaces, config.workspacesRoot, taskSlots);
+  const executor = new TaskExecutor(supabase, workspaces, config.workspacesRoot, taskSlots, config.sweepAfterRuns);
+  if (!config.sweepAfterRuns) {
+    logger.info("worker", "KNOWLEDGE_SWEEP_AFTER_RUNS is off — the librarian only sweeps on its schedule");
+  }
   const poller = new TaskPoller(supabase, taskSlots, (task) => executor.executeTask(task));
   const managerListener = new ManagerListener(supabase, workspaces, config.workspacesRoot);
   const scheduler = new Scheduler(supabase);
