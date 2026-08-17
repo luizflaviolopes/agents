@@ -67,6 +67,10 @@ agents.
   [docs/COMMS-AGENTS.md](docs/COMMS-AGENTS.md): triage agents that read your
   Slack/Gmail via MCP, draft replies in your voice, and propose every
   outbound message for your approval before anything is sent.
+- **GitHub agent** — [docs/GITHUB-AGENT.md](docs/GITHUB-AGENT.md): a steward
+  agent that triages issues, watches PRs and CI through the GitHub MCP server,
+  and sends you a daily digest. Covers the fine-grained PAT, the three ways to
+  connect, the instructions template, the scope doc and the schedules.
 - **Project management agents (Notion)** —
   [docs/PROJECT-MANAGEMENT-AGENTS.md](docs/PROJECT-MANAGEMENT-AGENTS.md):
   every project is created with a Project Manager agent that reads your

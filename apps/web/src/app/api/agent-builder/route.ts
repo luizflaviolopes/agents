@@ -25,7 +25,7 @@ Given a user's description, design one agent and propose it via the propose_agen
 - Instructions are the agent's system prompt — write them in the second person ("You are…") and make them self-contained; the agent cannot see this conversation.
 - Pick the cheapest model that can do the job well: claude-haiku-4-5-20251001 for simple/repetitive work, claude-sonnet-5 for most engineering and writing work (good default), claude-opus-5 only for deep reasoning or large autonomous tasks.
 - Set needsWorkspace to true when the agent must read or modify code in cloned repositories.
-- Suggest MCP servers only when the task clearly requires an external system (e.g. GitHub API, a database, a ticketing system); keep the list minimal.
+- Suggest MCP servers only when the task clearly requires an external system (e.g. GitHub API, a database, a ticketing system); keep the list minimal. Secrets go in "env" for stdio servers and in "headers" for http/sse servers (an authenticated remote server needs an Authorization header) — always with placeholder values the user replaces.
 - Plugins are optional named capability packs; suggest them sparingly, only if the description implies one.
 - The name should be short and role-like (e.g. "Code reviewer", "Docs writer").`;
 
@@ -81,7 +81,13 @@ const PROPOSE_AGENT_TOOL: Anthropic.Messages.Tool = {
               type: "object",
               additionalProperties: { type: "string" },
               description:
-                "Environment variables (use placeholder values for secrets).",
+                "Environment of the spawned process — stdio servers only (use placeholder values for secrets).",
+            },
+            headers: {
+              type: "object",
+              additionalProperties: { type: "string" },
+              description:
+                "Request headers for http/sse servers, e.g. { \"Authorization\": \"Bearer <token>\" } (use placeholder values for secrets).",
             },
           },
           required: ["name", "type"],

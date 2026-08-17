@@ -38,7 +38,10 @@ export const mcpServerSchema = z.object({
   command: z.string().optional(),
   args: z.array(z.string()).optional(),
   url: z.string().url().optional(),
+  /** stdio only — environment of the spawned process. */
   env: z.record(z.string()).optional(),
+  /** http/sse only — request headers (e.g. an Authorization bearer token). */
+  headers: z.record(z.string()).optional(),
 });
 export type McpServerInput = z.infer<typeof mcpServerSchema>;
 

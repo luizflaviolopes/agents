@@ -118,7 +118,8 @@ tool server for its runs. Shape (validated by `mcpServerSchema`):
   "type": "stdio" | "http" | "sse",
   "command": "...", "args": [...],  // stdio only
   "url": "...",                     // http / sse only
-  "env": { "KEY": "value" }         // optional, stdio only
+  "env": { "KEY": "value" },        // optional, stdio only
+  "headers": { "Name": "value" }    // optional, http / sse only
 }
 ```
 
@@ -137,19 +138,24 @@ MCP over stdin/stdout. The command must exist in the worker image (Node and
 ```
 
 **http** (or **sse** for legacy servers) — the worker connects to a remote MCP
-endpoint over the network; nothing to install:
+endpoint over the network; nothing to install. Authenticated endpoints take
+their credential in `headers` (`env` is meaningless here — there is no local
+process to give an environment to):
 
 ```json
 {
   "name": "github",
   "type": "http",
-  "url": "https://api.githubcopilot.com/mcp/"
+  "url": "https://api.githubcopilot.com/mcp/",
+  "headers": { "Authorization": "Bearer github_pat_…" }
 }
 ```
 
-Anything you put in `env` (tokens, etc.) is stored in the database and passed
-to the spawned process — prefer servers that can read secrets from the
-worker's own environment where possible.
+Anything you put in `env` or `headers` (tokens, etc.) is stored in the
+database — in `env`'s case passed to the spawned process, in `headers`' case
+sent to the remote endpoint on every request. Prefer servers that can read
+secrets from the worker's own environment where possible, and scope the
+credential to what the agent actually needs.
 
 For full worked examples of MCP-powered agents — Slack and Gmail triage
 agents with ready-to-paste configs, instructions, and voice profiles — see

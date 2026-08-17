@@ -23,7 +23,8 @@ export interface McpServerRow {
   command: string;
   args: string; // space separated
   url: string;
-  env: string; // KEY=VALUE, one per line
+  env: string; // stdio only — KEY=VALUE, one per line
+  headers: string; // http/sse only — Name: value, one per line
 }
 
 /** Roles the user can pick — managers are never created/changed here. */
@@ -73,18 +74,33 @@ export function mcpConfigToRow(config: McpServerConfig): McpServerRow {
     env: Object.entries(config.env ?? {})
       .map(([k, v]) => `${k}=${v}`)
       .join("\n"),
+    headers: Object.entries(config.headers ?? {})
+      .map(([k, v]) => `${k}: ${v}`)
+      .join("\n"),
   };
 }
 
-export function rowToMcpConfig(row: McpServerRow): McpServerConfig {
-  const env: Record<string, string> = {};
-  for (const line of row.env.split("\n")) {
+/**
+ * Parses "KEY=value" / "Name: value" lines. The delimiter is whichever of
+ * `=` and `:` comes first, so both `Authorization: Bearer x` and
+ * `SOME_URL=https://x` split where the user meant them to.
+ */
+function parseKeyValueLines(text: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const line of text.split("\n")) {
     const trimmed = line.trim();
     if (!trimmed) continue;
     const eq = trimmed.indexOf("=");
-    if (eq <= 0) continue;
-    env[trimmed.slice(0, eq).trim()] = trimmed.slice(eq + 1).trim();
+    const colon = trimmed.indexOf(":");
+    const candidates = [eq, colon].filter((i) => i > 0);
+    if (candidates.length === 0) continue;
+    const split = Math.min(...candidates);
+    out[trimmed.slice(0, split).trim()] = trimmed.slice(split + 1).trim();
   }
+  return out;
+}
+
+export function rowToMcpConfig(row: McpServerRow): McpServerConfig {
   const config: McpServerConfig = {
     name: row.name.trim(),
     type: row.type,
@@ -93,10 +109,15 @@ export function rowToMcpConfig(row: McpServerRow): McpServerConfig {
     if (row.command.trim()) config.command = row.command.trim();
     const args = row.args.split(/\s+/).filter(Boolean);
     if (args.length > 0) config.args = args;
-  } else if (row.url.trim()) {
-    config.url = row.url.trim();
+    // env belongs to the spawned process — stdio only.
+    const env = parseKeyValueLines(row.env);
+    if (Object.keys(env).length > 0) config.env = env;
+  } else {
+    if (row.url.trim()) config.url = row.url.trim();
+    // Remote servers authenticate with request headers, not env.
+    const headers = parseKeyValueLines(row.headers);
+    if (Object.keys(headers).length > 0) config.headers = headers;
   }
-  if (Object.keys(env).length > 0) config.env = env;
   return config;
 }
 
@@ -297,7 +318,15 @@ export function AgentForm({
             onClick={() =>
               set("mcpServers", [
                 ...value.mcpServers,
-                { name: "", type: "stdio", command: "", args: "", url: "", env: "" },
+                {
+                  name: "",
+                  type: "stdio",
+                  command: "",
+                  args: "",
+                  url: "",
+                  env: "",
+                  headers: "",
+                },
               ])
             }
           >
@@ -396,18 +425,37 @@ export function AgentForm({
                     />
                   </div>
                 )}
-                <div className="space-y-1">
-                  <Label className="text-xs text-muted-foreground">
-                    Env (KEY=value, one per line)
-                  </Label>
-                  <Textarea
-                    rows={2}
-                    className="font-mono text-xs"
-                    placeholder={"GITHUB_TOKEN=ghp_…"}
-                    value={server.env}
-                    onChange={(e) => updateServer(index, { env: e.target.value })}
-                  />
-                </div>
+                {server.type === "stdio" ? (
+                  <div className="space-y-1">
+                    <Label className="text-xs text-muted-foreground">
+                      Env (KEY=value, one per line)
+                    </Label>
+                    <Textarea
+                      rows={2}
+                      className="font-mono text-xs"
+                      placeholder={"GITHUB_PERSONAL_ACCESS_TOKEN=github_pat_…"}
+                      value={server.env}
+                      onChange={(e) =>
+                        updateServer(index, { env: e.target.value })
+                      }
+                    />
+                  </div>
+                ) : (
+                  <div className="space-y-1">
+                    <Label className="text-xs text-muted-foreground">
+                      Headers (Name: value, one per line)
+                    </Label>
+                    <Textarea
+                      rows={2}
+                      className="font-mono text-xs"
+                      placeholder={"Authorization: Bearer github_pat_…"}
+                      value={server.headers}
+                      onChange={(e) =>
+                        updateServer(index, { headers: e.target.value })
+                      }
+                    />
+                  </div>
+                )}
               </div>
             ))}
           </div>

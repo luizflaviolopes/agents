@@ -78,7 +78,14 @@ export interface McpServerConfig {
   args?: string[];
   /** For type 'http' | 'sse' */
   url?: string;
+  /** For type 'stdio': environment of the spawned MCP process. */
   env?: Record<string, string>;
+  /**
+   * For type 'http' | 'sse': request headers sent to the remote endpoint —
+   * this is how authenticated remote servers are reached, e.g.
+   * `{ "Authorization": "Bearer <token>" }`.
+   */
+  headers?: Record<string, string>;
 }
 
 /** Payload for pending_actions of type 'slack_reply' | 'slack_message'. */
