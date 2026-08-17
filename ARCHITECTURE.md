@@ -29,6 +29,12 @@ unions live in `packages/shared/src/db-types.ts`. Keep both in sync.
   enforces at most one manager per project. Config columns: `instructions`
   (system prompt), `model` (default `claude-sonnet-5`), `plugins` (jsonb
   string array), `mcp_servers` (jsonb array of `McpServerConfig`), `is_active`.
+  `POST /api/projects` staffs every new project with three of them in one
+  insert — **Manager** (`manager`), **Project Manager** (`specialist`) and
+  **Librarian** (`librarian`) — from the templates in
+  `packages/shared/src/default-agents.ts`; if that insert fails the project row
+  is rolled back. The Project Manager is created without MCP servers, so its
+  Notion half stays inert until the owner configures it.
 - **tasks** — the queue. `status`:
   `queued | in_progress | review | done | failed | cancelled`. `source`:
   `web | telegram | manager | system`. `agent_id` is the assignee;
@@ -230,7 +236,11 @@ arrays (`PENDING_ACTION_TYPES`, `PENDING_ACTION_STATUSES`,
 
 `supabase/migrations/0005_pm_librarian.sql` extends `schedules`,
 `agent_knowledge`, `agents`, and `messages` (no RLS — the 0002 revokes
-cover everything; only the service role has access).
+cover everything; only the service role has access). The Project Manager and
+Librarian agents themselves are auto-seeded (alongside the Manager) into every
+new project from the templates in `packages/shared/src/default-agents.ts`;
+`apps/worker/scripts/backfill-default-agents.ts` adds them to projects that
+predate this.
 
 ### Daily schedules
 

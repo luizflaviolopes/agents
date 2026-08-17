@@ -1,11 +1,13 @@
 # Project Management Agents — Project Manager & Librarian
 
-This guide walks you through setting up two per-project agents that keep a
-project running and remembering: a **Project Manager** agent that reads your
-team's Notion tasks board, posts a morning digest, and organizes/updates your
-roadmap page with you in chat — and a **Librarian** agent that curates
-everything the fleet knows, sweeping project activity on a schedule and
-folding durable facts into knowledge docs.
+Every project is created with two agents that keep it running and
+remembering: a **Project Manager** agent that reads your team's Notion tasks
+board, posts a morning digest, and organizes/updates your roadmap page with
+you in chat — and a **Librarian** agent that curates everything the fleet
+knows, sweeping project activity on a schedule and folding durable facts into
+knowledge docs. They arrive pre-instructed; this guide covers the parts only
+you can supply — the Notion integration, the schedules, and the grounding
+knowledge docs.
 
 The division of labor:
 
@@ -180,11 +182,28 @@ Notes:
 
 ## Agent templates
 
-Create the **Project Manager** as a **specialist** agent and the
-**Librarian** with the **librarian** role (the DB allows one per project,
-like the manager) — both with **no workspace** (they never touch a repo).
-Paste the instructions, then write the grounding knowledge docs (last
-section) before the first run.
+**Both agents already exist.** Every project is created with three agents:
+the **Manager**, a **Project Manager** (role `specialist`) and a
+**Librarian** (role `librarian`, one per project) — all with no workspace,
+since none of them touch a repo. The templates below are the instructions
+your agents start with — customize them per project in **project → Agents →
+Edit**. They now live in code, in
+[`packages/shared/src/default-agents.ts`](../packages/shared/src/default-agents.ts),
+as the single source used at creation time; edit that file to change what
+*new* projects get. (Projects created before this existed can be caught up
+with `pnpm --filter @agent-fleet/worker exec node --import tsx
+scripts/backfill-default-agents.ts`.)
+
+So what's left for you is what can't be defaulted: give the Project Manager
+its Notion MCP server (above) and its "Notion sources" doc, write the
+grounding knowledge docs (last section), and create the two schedules. Until
+the Notion server is configured the Project Manager simply reports that it
+has no Notion access — nothing runs against it, because no schedule exists
+until you make one.
+
+If you don't want one of these agents in a project, delete it — only the
+Manager is undeletable. Deleting the Librarian also drops the
+forward-durable-facts rule from every other agent's preamble.
 
 ### "Project Manager" agent — instructions
 

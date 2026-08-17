@@ -1,9 +1,8 @@
 import { NextResponse } from "next/server";
 import type { Project } from "@agent-fleet/shared";
-import { createProjectSchema } from "@agent-fleet/shared";
+import { createProjectSchema, DEFAULT_AGENTS } from "@agent-fleet/shared";
 import { apiHandler, jsonError, parseBody, requireUser } from "@/lib/api/auth";
 import { getAdminClient } from "@/lib/supabase/admin";
-import { defaultManagerInstructions } from "@/lib/manager";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -56,17 +55,24 @@ export const POST = apiHandler(async (request: Request) => {
     return jsonError(500, projectError?.message ?? "Failed to create project");
   }
 
-  // Every project gets a manager agent that routes work to specialists.
-  const { error: agentError } = await admin.from("agents").insert({
-    project_id: (project as Project).id,
-    name: "Manager",
-    role: "manager",
-    instructions: defaultManagerInstructions(input.name),
-  });
+  // Every project starts with the same three agents: the manager that routes
+  // work to specialists, the project manager (Notion digest + roadmap) and the
+  // librarian that curates the project's knowledge. The latter two need no
+  // workspace; the project manager still needs its Notion MCP server and
+  // "Notion sources" doc before it can do the Notion half of its job (see
+  // docs/PROJECT-MANAGEMENT-AGENTS.md).
+  const { error: agentError } = await admin.from("agents").insert(
+    DEFAULT_AGENTS.map(({ name, role, instructions }) => ({
+      project_id: (project as Project).id,
+      name,
+      role,
+      instructions,
+    })),
+  );
   if (agentError) {
-    // Best-effort rollback so we never leave a manager-less project behind.
+    // Best-effort rollback so we never leave a half-staffed project behind.
     await admin.from("projects").delete().eq("id", (project as Project).id);
-    return jsonError(500, `Manager agent creation failed: ${agentError.message}`);
+    return jsonError(500, `Default agent creation failed: ${agentError.message}`);
   }
 
   return NextResponse.json({ project }, { status: 201 });

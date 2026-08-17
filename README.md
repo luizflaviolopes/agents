@@ -4,9 +4,9 @@ Self-hosted platform for running a fleet of Claude agents against your own
 repositories. You create **projects**; each project contains **workspaces**
 (folders of cloned GitHub repos — multi-repo, pinned to a single branch each)
 and **agents** (Claude Agent SDK runtimes) that pick work off a Postgres-backed
-**task queue**. Every project has exactly one **manager** agent: you talk to it
-from the web UI or Telegram, and it decomposes your request into tasks for
-specialist agents. Everything an agent does — every tool call, every message —
+**task queue**. A **Manager**, a **Project Manager**, and a **Librarian** are
+created with every project: you talk to the manager from the web UI or
+Telegram, and it decomposes your request into tasks for specialist agents. Everything an agent does — every tool call, every message —
 is logged to `run_logs`, so a full audit trail of every run is one query away.
 
 **Stack:** Next.js 15 (web UI) · Node 22 worker service · Supabase
@@ -68,11 +68,13 @@ agents.
   Slack/Gmail via MCP, draft replies in your voice, and propose every
   outbound message for your approval before anything is sent.
 - **Project management agents (Notion)** —
-  [docs/PROJECT-MANAGEMENT-AGENTS.md](docs/PROJECT-MANAGEMENT-AGENTS.md): a
-  Project Manager agent that reads your team's Notion tasks board, sends a
-  morning digest (web + Telegram), and keeps your roadmap page organized
-  with you in chat — plus a Librarian agent that curates everything the
-  fleet knows.
+  [docs/PROJECT-MANAGEMENT-AGENTS.md](docs/PROJECT-MANAGEMENT-AGENTS.md):
+  every project is created with a Project Manager agent that reads your
+  team's Notion tasks board, sends a morning digest (web + Telegram), and
+  keeps your roadmap page organized with you in chat — plus a Librarian
+  agent that curates everything the fleet knows. The guide covers what you
+  still have to supply: the Notion integration, the schedules and the
+  grounding knowledge docs.
 
 ## Repository layout
 
