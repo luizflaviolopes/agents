@@ -18,6 +18,8 @@ import {
 } from "@agent-fleet/shared";
 import { buildAgentEnv, buildToolLimits } from "../lib/agent-env.js";
 import { logger } from "../lib/logger.js";
+import { mcpApprovalRule } from "../lib/mcp-approval.js";
+import { buildApprovalHooks } from "../runner/approval-hook.js";
 import type { WorkspaceManager } from "../workspaces/manager.js";
 import {
   buildFleetServer,
@@ -309,6 +311,9 @@ export class ManagerListener {
         model: agent.model || DEFAULT_MODEL,
         cwd,
         mcpServers,
+        // Same MCP approval gate as a task run (0010) — a chat turn is the same
+        // agent with the same credentials, so it cannot be the loophole.
+        ...buildApprovalHooks(agent.mcp_servers ?? []),
         permissionMode: "bypassPermissions",
         allowDangerouslySkipPermissions: true,
         settingSources: [],
@@ -675,6 +680,9 @@ function buildChatSystemPrompt(agent: Agent, knowledge: string, librarianRule: s
 
   const instructions = agent.instructions?.trim();
   let prompt = instructions ? `${preamble}\n\n${instructions}` : preamble;
+  // Same MCP approval gate as a task run (0010).
+  const mcpRule = mcpApprovalRule(agent.mcp_servers ?? []);
+  if (mcpRule) prompt += `\n\n${mcpRule}`;
   if (knowledge) prompt += `\n\n${knowledge}`;
   return prompt;
 }

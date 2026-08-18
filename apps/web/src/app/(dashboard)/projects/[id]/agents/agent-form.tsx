@@ -2,8 +2,13 @@
 
 import * as React from "react";
 import { Plus, Trash2, X } from "lucide-react";
-import type { Agent, McpServerConfig, McpServerType } from "@agent-fleet/shared";
-import { DEFAULT_MODEL } from "@agent-fleet/shared";
+import type {
+  Agent,
+  McpApprovalPolicy,
+  McpServerConfig,
+  McpServerType,
+} from "@agent-fleet/shared";
+import { DEFAULT_MODEL, MCP_INTEGRATION_TYPES } from "@agent-fleet/shared";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -25,6 +30,28 @@ export interface McpServerRow {
   url: string;
   env: string; // stdio only — KEY=VALUE, one per line
   headers: string; // http/sse only — Name: value, one per line
+  /** Approval policy (0010). */
+  approval: McpApprovalPolicy;
+  /** Comma-separated tool names to gate; empty gates every tool. */
+  askTools: string;
+  /** Integration holding the write token, or "" for none. */
+  integration: string;
+}
+
+/** A fresh, ungated server row — the shape "Add server" starts from. */
+export function emptyMcpServerRow(): McpServerRow {
+  return {
+    name: "",
+    type: "stdio",
+    command: "",
+    args: "",
+    url: "",
+    env: "",
+    headers: "",
+    approval: "never",
+    askTools: "",
+    integration: "",
+  };
 }
 
 /** Roles the user can pick — managers are never created/changed here. */
@@ -92,6 +119,9 @@ export function mcpConfigToRow(config: McpServerConfig): McpServerRow {
     headers: Object.entries(config.headers ?? {})
       .map(([k, v]) => `${k}: ${v}`)
       .join("\n"),
+    approval: config.approval ?? "never",
+    askTools: (config.askTools ?? []).join(", "),
+    integration: config.integration ?? "",
   };
 }
 
@@ -132,6 +162,16 @@ export function rowToMcpConfig(row: McpServerRow): McpServerConfig {
     // Remote servers authenticate with request headers, not env.
     const headers = parseKeyValueLines(row.headers);
     if (Object.keys(headers).length > 0) config.headers = headers;
+  }
+  // Approval settings (0010). 'never' and an empty tool list are the absent
+  // state, so an ungated server serialises exactly as it did before 0010.
+  if (row.approval === "ask") {
+    config.approval = "ask";
+    const askTools = parseToolList(row.askTools);
+    if (askTools.length > 0) config.askTools = askTools;
+    if (row.integration) {
+      config.integration = row.integration as NonNullable<McpServerConfig["integration"]>;
+    }
   }
   return config;
 }
@@ -353,20 +393,7 @@ export function AgentForm({
             type="button"
             variant="outline"
             size="sm"
-            onClick={() =>
-              set("mcpServers", [
-                ...value.mcpServers,
-                {
-                  name: "",
-                  type: "stdio",
-                  command: "",
-                  args: "",
-                  url: "",
-                  env: "",
-                  headers: "",
-                },
-              ])
-            }
+            onClick={() => set("mcpServers", [...value.mcpServers, emptyMcpServerRow()])}
           >
             <Plus />
             Add server
@@ -494,11 +521,116 @@ export function AgentForm({
                     />
                   </div>
                 )}
+
+                <McpApprovalFields
+                  server={server}
+                  onChange={(patch) => updateServer(index, patch)}
+                />
               </div>
             ))}
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------------ */
+
+/**
+ * Approval policy for one MCP server (0010).
+ *
+ * The gate is per-server rather than global because the interesting setting is
+ * per-server: a repo-reading agent wants its GitHub reads to stay instant and
+ * only `create_pull_request` to wait for a human.
+ */
+function McpApprovalFields({
+  server,
+  onChange,
+}: {
+  server: McpServerRow;
+  onChange: (patch: Partial<McpServerRow>) => void;
+}) {
+  const gated = server.approval === "ask";
+  const allTools = parseToolList(server.askTools).length === 0;
+
+  return (
+    <div className="space-y-2 border-t border-border pt-2">
+      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+        <div className="space-y-1">
+          <Label className="text-xs text-muted-foreground">Approval</Label>
+          <Select
+            value={server.approval}
+            onChange={(e) =>
+              onChange({ approval: e.target.value as McpApprovalPolicy })
+            }
+          >
+            <option value="never">Run without asking</option>
+            <option value="ask">Ask before running</option>
+          </Select>
+        </div>
+        {gated && (
+          <div className="space-y-1">
+            <Label className="text-xs text-muted-foreground">
+              Write token from
+            </Label>
+            <Select
+              value={server.integration}
+              onChange={(e) => onChange({ integration: e.target.value })}
+            >
+              <option value="">
+                the agent&apos;s own credentials above
+              </option>
+              {MCP_INTEGRATION_TYPES.map((type) => (
+                <option key={type} value={type}>
+                  the {type} integration
+                </option>
+              ))}
+            </Select>
+          </div>
+        )}
+      </div>
+
+      {gated && (
+        <>
+          <div className="space-y-1">
+            <Label className="text-xs text-muted-foreground">
+              Tools needing approval (comma separated)
+            </Label>
+            <Input
+              placeholder="create_pull_request, merge_pull_request"
+              value={server.askTools}
+              onChange={(e) => onChange({ askTools: e.target.value })}
+            />
+          </div>
+          <p className="text-xs text-muted-foreground">
+            {allTools ? (
+              <>
+                <strong className="font-medium text-foreground">
+                  Every tool on this server needs approval.
+                </strong>{" "}
+                Naming tools narrows the gate to those — but that is a snapshot:
+                a tool the server adds later would not be gated until you add it
+                here. Leaving this empty is the setting that stays correct on its
+                own.
+              </>
+            ) : (
+              <>
+                Only these tools are gated; every other tool on this server runs
+                inline. Nothing detects writes for you — a tool you forget to
+                list runs unasked, and a tool the server adds later is not gated
+                until you add it.
+              </>
+            )}
+          </p>
+          <p className="text-xs text-muted-foreground">
+            Approval alone does not keep a write token away from the agent. Put
+            a read-only credential in the fields above and the write token in an
+            integration, and the token only ever exists in the server-side
+            executor — that part no prompt can talk its way past.
+          </p>
+        </>
+      )}
     </div>
   );
 }

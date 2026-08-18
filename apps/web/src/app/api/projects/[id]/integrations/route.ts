@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import {
   INTEGRATION_TYPES,
   gmailIntegrationConfigSchema,
+  mcpIntegrationConfigSchema,
   slackIntegrationConfigSchema,
   upsertIntegrationSchema,
 } from "@agent-fleet/shared";
@@ -80,10 +81,14 @@ export const PUT = apiHandler(async (request: Request, { params }: Params) => {
   await requireProjectAccess(user.id, id);
   const input = await parseBody(request, upsertIntegrationSchema);
 
+  // github/notion share one shape: a write token for the action executor's own
+  // MCP connection, plus where that token goes (0010).
   const configSchema =
     input.type === "slack"
       ? slackIntegrationConfigSchema
-      : gmailIntegrationConfigSchema;
+      : input.type === "gmail"
+        ? gmailIntegrationConfigSchema
+        : mcpIntegrationConfigSchema;
   const parsedConfig = configSchema.safeParse(input.config);
   if (!parsedConfig.success) {
     return jsonError(

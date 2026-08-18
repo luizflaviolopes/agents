@@ -11,6 +11,7 @@ import {
 } from "lucide-react";
 import type {
   GmailActionPayload,
+  McpToolCallActionPayload,
   PendingActionRow,
   PendingActionType,
   SlackActionPayload,
@@ -53,6 +54,10 @@ const ACTION_TYPE_META: Record<
     label: "gmail send",
     className: "border-transparent bg-rose-500/15 text-rose-400",
   },
+  mcp_tool_call: {
+    label: "mcp call",
+    className: "border-transparent bg-sky-500/15 text-sky-400",
+  },
 };
 
 function ActionTypeBadge({ type }: { type: PendingActionType }) {
@@ -73,6 +78,15 @@ function mainText(action: PendingActionJoined): string {
   return action.action_type.startsWith("slack")
     ? ((action.payload as SlackActionPayload).text ?? "")
     : ((action.payload as GmailActionPayload).body ?? "");
+}
+
+/**
+ * True when the owner may edit the payload before approving. False for
+ * 'mcp_tool_call': its arguments are frozen on purpose — approving one means
+ * approving that exact call, and the API rejects an edited payload for it.
+ */
+function isEditable(action: PendingActionJoined): boolean {
+  return action.action_type !== "mcp_tool_call";
 }
 
 export function ReviewPanel({ projectId }: { projectId: string }) {
@@ -96,8 +110,8 @@ export function ReviewPanel({ projectId }: { projectId: string }) {
     <div className="mx-auto max-w-3xl px-4 py-4 sm:px-8 sm:py-6">
       <div className="mb-5">
         <p className="text-sm text-muted-foreground">
-          Agents never send anything directly — every outbound Slack message
-          and email waits here for your approval.
+          Agents never act outward directly — outbound Slack messages, emails
+          and approval-gated MCP tool calls all wait here for your approval.
         </p>
       </div>
 
@@ -110,7 +124,7 @@ export function ReviewPanel({ projectId }: { projectId: string }) {
         <EmptyState
           icon={Inbox}
           title="Nothing waiting for review"
-          description="When an agent proposes a Slack message or an email, it shows up here for you to approve, edit, or reject."
+          description="When an agent proposes a Slack message, an email, or a gated MCP tool call, it shows up here for you to approve, edit, or reject."
         />
       ) : (
         <div className="space-y-4">
@@ -141,13 +155,14 @@ function PendingActionCard({
   projectId: string;
   onDecided: () => void;
 }) {
+  const editable = isEditable(action);
   const original = mainText(action);
   const [text, setText] = React.useState(original);
   const [showRaw, setShowRaw] = React.useState(false);
   const [busy, setBusy] = React.useState<"approved" | "rejected" | null>(null);
   const [error, setError] = React.useState<string | null>(null);
 
-  const edited = text !== original;
+  const edited = editable && text !== original;
 
   async function decide(decision: "approved" | "rejected") {
     setBusy(decision);
@@ -202,41 +217,47 @@ function PendingActionCard({
           {action.preview}
         </div>
 
-        <div className="mt-3 space-y-2">
-          <Label htmlFor={`action-text-${action.id}`}>
-            {action.action_type.startsWith("slack")
-              ? "Message text"
-              : "Email body"}
-            {edited && (
-              <span className="ml-2 text-xs font-normal text-amber-400">
-                edited — the edited version will be sent
-              </span>
-            )}
-          </Label>
-          <Textarea
-            id={`action-text-${action.id}`}
-            rows={Math.min(10, Math.max(3, text.split("\n").length + 1))}
-            value={text}
-            onChange={(e) => setText(e.target.value)}
-          />
-        </div>
+        {editable ? (
+          <>
+            <div className="mt-3 space-y-2">
+              <Label htmlFor={`action-text-${action.id}`}>
+                {action.action_type.startsWith("slack")
+                  ? "Message text"
+                  : "Email body"}
+                {edited && (
+                  <span className="ml-2 text-xs font-normal text-amber-400">
+                    edited — the edited version will be sent
+                  </span>
+                )}
+              </Label>
+              <Textarea
+                id={`action-text-${action.id}`}
+                rows={Math.min(10, Math.max(3, text.split("\n").length + 1))}
+                value={text}
+                onChange={(e) => setText(e.target.value)}
+              />
+            </div>
 
-        <button
-          type="button"
-          onClick={() => setShowRaw((s) => !s)}
-          className="mt-3 inline-flex items-center gap-1 text-xs text-muted-foreground transition-colors hover:text-foreground"
-        >
-          {showRaw ? (
-            <ChevronDown className="size-3.5" />
-          ) : (
-            <ChevronRight className="size-3.5" />
-          )}
-          Raw payload
-        </button>
-        {showRaw && (
-          <pre className="mt-2 max-h-48 overflow-auto rounded-md border border-border bg-background/60 p-2 font-mono text-xs leading-relaxed text-muted-foreground">
-            {JSON.stringify(action.payload, null, 2)}
-          </pre>
+            <button
+              type="button"
+              onClick={() => setShowRaw((s) => !s)}
+              className="mt-3 inline-flex items-center gap-1 text-xs text-muted-foreground transition-colors hover:text-foreground"
+            >
+              {showRaw ? (
+                <ChevronDown className="size-3.5" />
+              ) : (
+                <ChevronRight className="size-3.5" />
+              )}
+              Raw payload
+            </button>
+            {showRaw && (
+              <pre className="mt-2 max-h-48 overflow-auto rounded-md border border-border bg-background/60 p-2 font-mono text-xs leading-relaxed text-muted-foreground">
+                {JSON.stringify(action.payload, null, 2)}
+              </pre>
+            )}
+          </>
+        ) : (
+          <McpCallDetail action={action} />
         )}
 
         {error && <p className="mt-3 text-sm text-destructive">{error}</p>}
@@ -254,7 +275,7 @@ function PendingActionCard({
           </Button>
           <Button
             size="sm"
-            disabled={busy !== null || text.trim().length === 0}
+            disabled={busy !== null || (editable && text.trim().length === 0)}
             onClick={() => decide("approved")}
           >
             <Check />
@@ -271,6 +292,40 @@ function PendingActionCard({
 }
 
 /* ------------------------------------------------------------------------ */
+
+/**
+ * Read-only view of a gated MCP call: which tool on which server, and the exact
+ * arguments. Shown expanded rather than behind a toggle because these ARE the
+ * decision — for a Slack message the preview carries the meaning, but "update
+ * this page" means nothing without seeing which page and with what.
+ */
+function McpCallDetail({ action }: { action: PendingActionJoined }) {
+  const payload = action.payload as McpToolCallActionPayload;
+
+  return (
+    <div className="mt-3 space-y-2">
+      <div className="flex flex-wrap items-baseline gap-x-2">
+        <Label>Call</Label>
+        <code className="font-mono text-xs text-foreground">
+          {payload.server}.{payload.tool}
+        </code>
+      </div>
+      <Label htmlFor={`action-args-${action.id}`} className="text-muted-foreground">
+        Arguments — sent exactly as shown, and not editable
+      </Label>
+      <pre
+        id={`action-args-${action.id}`}
+        className="max-h-64 overflow-auto rounded-md border border-border bg-background/60 p-2 font-mono text-xs leading-relaxed text-muted-foreground"
+      >
+        {JSON.stringify(payload.arguments ?? {}, null, 2)}
+      </pre>
+      <p className="text-xs text-muted-foreground">
+        To change anything, reject this and ask the agent to propose a corrected
+        call.
+      </p>
+    </div>
+  );
+}
 
 function HistorySection({ actions }: { actions: PendingActionJoined[] }) {
   const [open, setOpen] = React.useState(false);

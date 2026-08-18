@@ -23,18 +23,23 @@ that pattern applied to GitHub, plus the platform-specific gotchas.
    `notify_user` tool (web chat + Telegram) and repeats it in the task result.
 4. **Scheduling** — a daily schedule for the digest, optionally a short
    interval schedule for PR/CI watching.
-5. **Guardrails** — three layers, in order of strength:
+5. **Guardrails** — four layers, in order of strength:
    - the **PAT's permissions** (hard: the API refuses what the token can't do),
    - the **read-only MCP URL** variant if you want zero writes at all,
+   - the **approval gate** (migration 0010): set the server's approval policy to
+     *Ask before running*, and gated tools stop being callable in-session — the
+     agent has to propose them, and the worker's executor makes the call only
+     after you approve it in Review or Telegram. Put the write PAT in the
+     **GitHub integration** rather than on the agent and the write token never
+     enters an LLM session at all,
    - the **agent instructions** (soft: the agent runs with
      `permissionMode: "bypassPermissions"`, so instructions are the only thing
-     standing between it and any tool it *does* have).
+     standing between it and any *ungated* tool it has).
 
-> **There is no approval gate for GitHub actions.** The `pending_actions`
-> approval flow (Review tab / Telegram buttons) only covers Slack and Gmail —
-> `PENDING_ACTION_TYPES` in `@agent-fleet/shared` has no GitHub types. So a
-> GitHub write happens the moment the agent decides to make it. Size the PAT
-> accordingly, and start read-only for the first week.
+> **Approval is opt-in per server.** A GitHub MCP server with no approval policy
+> still writes the moment the agent decides to — that is the default, and it is
+> the right one for a read-only digest agent. Turn the gate on for any agent
+> holding a PAT that can write. See "Gating writes" below.
 
 ---
 
@@ -135,10 +140,54 @@ Toolset names you can substitute for `{toolset}` in `/mcp/x/{toolset}` (and
 `secret_protection`, `security_advisories`, `stargazers`, `users`.
 
 **Start here:** `https://api.githubcopilot.com/mcp/readonly` for the first
-week. When the digests look right, drop `/readonly`.
+week. When the digests look right, you have two ways forward — and the second
+is strictly better:
+
+- drop `/readonly`, so the agent can write directly, or
+- **leave the agent on `/readonly` permanently** and configure the approval
+  gate below with the write-capable URL in the integration. The agent then
+  cannot write even if something it reads talks it into trying, and approved
+  writes still go through.
 
 For GitHub Enterprise Cloud with a subdomain, the host is
 `https://copilot-api.{subdomain}.ghe.com/mcp`.
+
+### Gating writes (migration 0010)
+
+An agent that reads issue bodies, PR descriptions and diffs is an agent reading
+text written by people who are not you. If it also holds a PAT that can write,
+anything it reads can ask it to spend that PAT. The gate closes that:
+
+1. **On the agent** (Agents → the agent → MCP servers), set **Approval** to
+   *Ask before running*. Leave the tool list empty to gate every tool on the
+   server, or name specific ones (`create_pull_request`, `merge_pull_request`).
+   An empty list is the setting that stays correct on its own — a named list is
+   a snapshot, and a tool GitHub's MCP server adds later would not be gated
+   until you add it.
+2. Set **Write token from** to *the github integration*.
+3. **On the project** (Workspaces → Integrations → GitHub), save the
+   **write-capable PAT**, and set the **write endpoint** to
+   `https://api.githubcopilot.com/mcp/`.
+4. Point the agent's own server URL at `.../mcp/readonly` with a **read-only
+   PAT**.
+
+What you get: reads run inline at full speed; a gated write is refused
+in-session and the agent proposes it instead; the proposal appears in Review and
+on Telegram with the agent's own plain-language preview plus the exact
+arguments; on approval the worker connects to the write endpoint with the write
+PAT and makes the call. The write PAT is never in the agent's session, its
+prompt, or its environment.
+
+Two things to know before you rely on it:
+
+- **A gated proposal ends the run.** The task lands in `review` and the agent
+  never sees what the call returned, so it cannot create a PR and then comment
+  on it in the same run. Write agent instructions that do the reading first and
+  propose writes last. The returned text is posted to the project chat, so
+  nothing is lost — it just arrives after the run.
+- **Nothing detects writes for you.** Tool names are free-form; there is no
+  reliable way to tell a write from a read by name. The gate is exactly what you
+  configure, and the credential is the boundary that holds regardless.
 
 ### Route B — stdio server inside the worker
 
@@ -415,5 +464,8 @@ agents, there's no second copy in a project Integration — GitHub isn't an
 | The agent reports "no GitHub tools available" | MCP server failed to start — check the run's first `system/init` log entry for `mcp_servers`, and the worker logs |
 | `npx` route hangs on the first run | it's downloading the package into the container; pin the version and expect a slow first start |
 | Writes silently absent from the digest | you're on a `/readonly` URL, or the PAT lacks Issues/Pull requests write |
+| Agent says a tool "requires approval and cannot be called directly" | working as intended — the proposal is in Review; approve it there or on Telegram |
+| Approved call fails with a 4xx from GitHub | the integration's write token or write endpoint is wrong — a `/readonly` write endpoint refuses writes whatever the PAT |
+| Agent proposes a write, then stops mid-task | expected: proposing ends the run. Reorder its instructions to do reads first, writes last |
 | Tool names in the logs don't match this guide | Route B's server (or a newer official release) — the instructions tell the agent to adapt, but check its report for "capability missing" notes |
 | Duplicate comments across runs | the "one comment per run, read existing comments first" rule is being ignored — tighten it, or lengthen the schedule interval |

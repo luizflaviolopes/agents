@@ -1,18 +1,28 @@
 import type { RealtimeChannel, SupabaseClient } from "@supabase/supabase-js";
 import {
   gmailIntegrationConfigSchema,
+  mcpIntegrationConfigSchema,
   slackIntegrationConfigSchema,
+  type Agent,
   type GmailActionPayload,
   type IntegrationRow,
+  type IntegrationType,
+  type McpIntegrationConfig,
+  type McpServerConfig,
+  type McpToolCallActionPayload,
   type PendingActionRow,
   type SlackActionPayload,
 } from "@agent-fleet/shared";
 import { logger } from "../lib/logger.js";
+import { findServer, gatesTool } from "../lib/mcp-approval.js";
+import { callMcpTool } from "./mcp-client.js";
 
 const LOOP_INTERVAL_MS = 5_000;
 const MAX_ACTIONS_PER_PASS = 20;
 const PREVIEW_MAX_CHARS = 500;
 const ERROR_MAX_CHARS = 2_000;
+/** Ceiling on a tool's returned text when mirrored into the project chat. */
+const RESULT_MAX_CHARS = 1_500;
 
 /** Sends a message to the project owner's linked Telegram chat. */
 export type TelegramNotifier = (projectId: string, text: string) => Promise<void>;
@@ -116,7 +126,7 @@ export class ActionExecutor {
   private async executeAction(action: PendingActionRow): Promise<void> {
     logger.info("actions", `executing action ${action.id} (${action.action_type})`);
     try {
-      await this.send(action);
+      const resultText = await this.send(action);
       const { error } = await this.supabase
         .from("pending_actions")
         .update({ status: "executed", executed_at: new Date().toISOString() })
@@ -124,7 +134,7 @@ export class ActionExecutor {
         .eq("status", "approved");
       if (error) logger.error("actions", `failed to mark action ${action.id} executed: ${error.message}`);
       logger.info("actions", `action ${action.id} executed`);
-      await this.recordOutcome(action, true, null);
+      await this.recordOutcome(action, true, null, resultText);
     } catch (err) {
       const message = (err instanceof Error ? err.message : String(err)).slice(0, ERROR_MAX_CHARS);
       logger.error("actions", `action ${action.id} failed: ${message}`);
@@ -138,8 +148,18 @@ export class ActionExecutor {
     }
   }
 
-  /** Routes to the correct integration + sender. Throws with a clear error. */
-  private async send(action: PendingActionRow): Promise<void> {
+  /**
+   * Routes to the correct sender and returns whatever text it produced (null
+   * for the fire-and-forget senders). Throws with a clear error.
+   */
+  private async send(action: PendingActionRow): Promise<string | null> {
+    // mcp_tool_call resolves its target from the proposing agent's own server
+    // config rather than from a per-project integration row, so it routes
+    // before the integration lookup below.
+    if (action.action_type === "mcp_tool_call") {
+      return await this.sendMcpToolCall(action);
+    }
+
     const integrationType = action.action_type.startsWith("slack") ? "slack" : "gmail";
     const { data, error } = await this.supabase
       .from("integrations")
@@ -161,6 +181,122 @@ export class ActionExecutor {
     } else {
       await this.sendGmail(integration, action.payload as GmailActionPayload);
     }
+    return null;
+  }
+
+  // ----------------------------------------------------------- mcp tool call
+
+  /**
+   * Makes one approved MCP tool call (0010).
+   *
+   * Everything specific to the target system lives in the target MCP server,
+   * so this method is the same code for GitHub, Notion or anything added
+   * later: resolve the server the agent named, swap in the write credential if
+   * one is configured, forward the frozen arguments.
+   *
+   * The policy is re-checked here rather than trusted from proposal time. The
+   * row could have been sitting in the inbox while the owner narrowed the
+   * agent's configuration, and "the gate was open when this was proposed" is
+   * not a reason to make a call the gate now forbids.
+   */
+  private async sendMcpToolCall(action: PendingActionRow): Promise<string> {
+    const payload = action.payload as McpToolCallActionPayload;
+    if (
+      !payload ||
+      typeof payload.server !== "string" ||
+      typeof payload.tool !== "string" ||
+      typeof payload.arguments !== "object" ||
+      payload.arguments === null
+    ) {
+      throw new Error(
+        "mcp_tool_call payload is malformed (expected { server, tool, arguments }).",
+      );
+    }
+
+    if (!action.agent_id) {
+      throw new Error(
+        "The agent that proposed this call no longer exists, so its MCP server configuration " +
+          "cannot be resolved. Reject this action and ask the current agent to propose it again.",
+      );
+    }
+
+    const { data, error } = await this.supabase
+      .from("agents")
+      .select("*")
+      .eq("id", action.agent_id)
+      .maybeSingle();
+    if (error) throw new Error(`Failed to load the proposing agent: ${error.message}`);
+    const agent = data as Agent | null;
+    if (!agent) {
+      throw new Error(
+        "The agent that proposed this call has been deleted. Reject this action and propose it again.",
+      );
+    }
+
+    const server = findServer(agent.mcp_servers ?? [], payload.server);
+    if (!server) {
+      throw new Error(
+        `Agent "${agent.name}" no longer has an MCP server named "${payload.server}".`,
+      );
+    }
+    if (!gatesTool(server, payload.tool)) {
+      throw new Error(
+        `${payload.tool} on "${server.name}" is no longer an approval-gated tool for agent ` +
+          `"${agent.name}", so this queued approval is stale. Reject it — with the gate open the ` +
+          `agent can make this call itself.`,
+      );
+    }
+
+    const credential = await this.loadMcpCredential(action.project_id, server);
+    logger.info(
+      "actions",
+      `action ${action.id}: calling ${server.name}.${payload.tool} ` +
+        `(credential: ${credential ? `${server.integration} integration` : "the agent's own"})`,
+    );
+    return await callMcpTool(server, payload.tool, payload.arguments, credential);
+  }
+
+  /**
+   * The write credential for `server`, or null when it names no integration.
+   *
+   * Null is the interim state, not an error: the gate still works, the owner
+   * still approves, but the credential the call goes out with is the one in the
+   * agent's own config — the same token the LLM session holds. Pointing the
+   * server at an integration is what moves the write token out of reach of
+   * anything the agent reads.
+   */
+  private async loadMcpCredential(
+    projectId: string,
+    server: McpServerConfig,
+  ): Promise<McpIntegrationConfig | null> {
+    if (!server.integration) return null;
+    const type: IntegrationType = server.integration;
+
+    const { data, error } = await this.supabase
+      .from("integrations")
+      .select("*")
+      .eq("project_id", projectId)
+      .eq("type", type)
+      .maybeSingle();
+    if (error) throw new Error(`Failed to load the ${type} integration: ${error.message}`);
+
+    const integration = data as IntegrationRow | null;
+    if (!integration) {
+      throw new Error(
+        `MCP server "${server.name}" is configured to use the ${type} integration's write token, ` +
+          `but no ${type} integration exists for this project. Add one in the project's ` +
+          `integration settings.`,
+      );
+    }
+
+    const parsed = mcpIntegrationConfigSchema.safeParse(integration.config);
+    if (!parsed.success) {
+      throw new Error(
+        `The ${type} integration config is invalid — it must contain a non-empty 'writeToken' ` +
+          `(plus 'envVar' for a stdio server). Reconfigure it in the project's integration settings.`,
+      );
+    }
+    return parsed.data;
   }
 
   // ------------------------------------------------------------------ slack
@@ -249,12 +385,27 @@ export class ActionExecutor {
 
   // ---------------------------------------------------------------- outcome
 
-  /** Project chat message + Telegram note for both success and failure. */
-  private async recordOutcome(action: PendingActionRow, ok: boolean, errorText: string | null): Promise<void> {
+  /**
+   * Project chat message + Telegram note for both success and failure.
+   *
+   * `resultText` is what the call returned, and it is recorded rather than
+   * dropped because for an mcp_tool_call it is often the only place the value
+   * exists: the proposing run ended at 'review', so the agent never saw it. A
+   * created page's URL or a new PR's number lands here, where the owner and any
+   * later run reading the project chat can pick it up.
+   */
+  private async recordOutcome(
+    action: PendingActionRow,
+    ok: boolean,
+    errorText: string | null,
+    resultText?: string | null,
+  ): Promise<void> {
     const preview = truncate(action.preview, PREVIEW_MAX_CHARS);
+    const verb = action.action_type === "mcp_tool_call" ? "Done" : "Sent";
+    const returned = ok && resultText?.trim() ? `\n\n${truncate(resultText.trim(), RESULT_MAX_CHARS)}` : "";
     const content = ok
-      ? `✅ Sent: ${preview}`
-      : `❌ Failed to send: ${preview} — ${errorText ?? "unknown error"}`;
+      ? `✅ ${verb}: ${preview}${returned}`
+      : `❌ Failed: ${preview} — ${errorText ?? "unknown error"}`;
 
     try {
       const { error } = await this.supabase.from("messages").insert({

@@ -40,6 +40,11 @@ const gmailActionPayloadSchema = z.object({
  * action, optionally with an edited payload (merged over the stored one and
  * validated against the action type's shape). Only allowed while the action
  * is still 'pending' — 409 otherwise.
+ *
+ * 'mcp_tool_call' payloads are not editable: the arguments the owner reviewed
+ * have to be the arguments the executor sends, and an edited argument object is
+ * a call nobody has actually inspected against the target tool's schema.
+ * Rejecting and re-proposing is the way to change one.
  */
 export const PATCH = apiHandler(async (request: Request, { params }: Params) => {
   const { actionId } = await params;
@@ -57,6 +62,13 @@ export const PATCH = apiHandler(async (request: Request, { params }: Params) => 
   };
 
   if (input.payload !== undefined) {
+    if (action.action_type === "mcp_tool_call") {
+      return jsonError(
+        400,
+        "An MCP tool call's arguments are frozen — approve it as proposed, or reject it and " +
+          "have the agent propose a corrected call.",
+      );
+    }
     const merged = {
       ...(action.payload as unknown as Record<string, unknown>),
       ...input.payload,

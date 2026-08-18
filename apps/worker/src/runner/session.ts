@@ -6,10 +6,11 @@ import {
 } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import {
-  PENDING_ACTION_TYPES,
+  PROPOSABLE_ACTION_TYPES,
   type Agent,
   type AgentKnowledgeRow,
   type McpServerConfig,
+  type McpToolCallActionPayload,
   type MessageChannel,
   type PendingActionRow,
   type PendingActionType,
@@ -17,6 +18,7 @@ import {
   type TaskStatus,
 } from "@agent-fleet/shared";
 import { logger, type RunLogWriter } from "../lib/logger.js";
+import { findServer, gatedServers, gatesTool, sdkToolName } from "../lib/mcp-approval.js";
 import type { Semaphore } from "../lib/semaphore.js";
 
 const ASK_AGENT_POLL_MS = 3_000;
@@ -122,6 +124,8 @@ export interface FleetSessionContext {
 /**
  * Builds the in-process 'fleet' MCP server for one agent session:
  * - propose_action — queue an approval-gated outbound Slack/Gmail action.
+ * - propose_tool_call — queue an approval-gated MCP tool call (0010); only
+ *   present when the agent has at least one gated server.
  * - ask_agent — delegate a question to another agent as a child task, and
  *   block until it answers.
  * - spawn_tasks — fan work out to another agent WITHOUT blocking; the worker
@@ -149,7 +153,7 @@ export function buildFleetServer(ctx: FleetSessionContext): SdkMcpServerConfig {
       "Payload for gmail_reply/gmail_send: { to, subject, body, cc?, thread_id?, in_reply_to_message_id? } " +
       "(gmail_reply requires thread_id and/or in_reply_to_message_id).",
     {
-      action_type: z.enum(PENDING_ACTION_TYPES).describe("The kind of outbound action"),
+      action_type: z.enum(PROPOSABLE_ACTION_TYPES).describe("The kind of outbound action"),
       preview: z.string().min(1).describe("Human-readable summary shown to the user for approval"),
       payload: z.record(z.unknown()).describe("Exact payload the executor will send (see tool description)"),
     },
@@ -411,6 +415,113 @@ export function buildFleetServer(ctx: FleetSessionContext): SdkMcpServerConfig {
     },
   );
 
+  /**
+   * The sanctioned path past the PreToolUse gate (0010). It exists as a tool
+   * rather than as a silent interception because approval needs a preview a
+   * person can actually read: a hook can only see `{server, tool, args}`, and
+   * "approve notion-update-page {page_id: 'a3f…'}" is not a decision anyone can
+   * make. Asking the agent for the preview is what makes the Review inbox
+   * meaningful — and an inbox whose entries are unreadable is an inbox that
+   * gets approved blind, which would defeat the gate more thoroughly than not
+   * having it.
+   */
+  const proposeToolCall = tool(
+    "propose_tool_call",
+    "Propose a call to one of your approval-gated MCP tools. The call is NOT made now — it is " +
+      "queued for the project owner to approve or reject, and a deterministic executor makes it " +
+      "afterwards. You will NOT see the result, and proposing ends this run, so do everything else " +
+      "first and propose gated calls last. Pass the arguments exactly as you would have called the " +
+      "tool with: they are frozen at approval and cannot be corrected later.",
+    {
+      server: z.string().min(1).describe("Name of the MCP server, e.g. 'github'"),
+      tool_name: z
+        .string()
+        .min(1)
+        .describe("Bare tool name without the mcp__<server>__ prefix, e.g. 'create_pull_request'"),
+      arguments: z
+        .record(z.unknown())
+        .describe("Exact arguments for the tool — the executor sends these unchanged"),
+      preview: z
+        .string()
+        .min(1)
+        .describe(
+          "Plain-language description of what this call will do, shown to the owner for approval. " +
+            "Name the target (repo, page, channel) and the effect — the owner decides from this text.",
+        ),
+    },
+    async (args) => {
+      const configs = agent.mcp_servers ?? [];
+      const server = findServer(configs, args.server);
+      if (!server) {
+        const names = configs.map((config) => config.name).join(", ") || "none";
+        return textResult(
+          `Error: you have no MCP server named "${args.server}". Your servers: ${names}.`,
+        );
+      }
+      if (!gatesTool(server, args.tool_name)) {
+        // Proposing an ungated call would put a pointless approval in front of
+        // the owner AND cost the agent its run, so send it back to the direct
+        // call it should have made.
+        return textResult(
+          `Error: ${args.tool_name} on "${server.name}" does not require approval — call it ` +
+            `directly as ${sdkToolName(server.name, args.tool_name)} instead. propose_tool_call is ` +
+            `only for gated tools.`,
+        );
+      }
+
+      const payload: McpToolCallActionPayload = {
+        server: server.name,
+        tool: args.tool_name,
+        arguments: args.arguments,
+      };
+
+      const { data, error } = await supabase
+        .from("pending_actions")
+        .insert({
+          project_id: projectId,
+          task_id: ctx.task?.id ?? null,
+          agent_id: agent.id,
+          action_type: "mcp_tool_call",
+          preview: args.preview,
+          payload,
+          status: "pending",
+        })
+        .select("*")
+        .single();
+      if (error) return textResult(`Error creating pending action: ${error.message}`);
+      const action = data as PendingActionRow;
+
+      ctx.runState.pendingActionsCreated += 1;
+      logger.info(
+        "fleet",
+        `agent ${agent.name}: pending action ${action.id} (mcp_tool_call ${server.name}.${args.tool_name}) proposed`,
+      );
+      await ctx.runLog?.write("status", {
+        status: "pending_action_created",
+        pending_action_id: action.id,
+        action_type: action.action_type,
+        mcp_server: server.name,
+        mcp_tool: args.tool_name,
+        preview: truncate(action.preview, 500),
+      });
+
+      if (ctx.pendingActionNotifier) {
+        try {
+          const projectName = await loadProjectName(supabase, projectId);
+          await ctx.pendingActionNotifier(action, projectName, agent.name);
+        } catch (err) {
+          logger.error("fleet", `telegram notification for pending action ${action.id} failed`, err);
+        }
+      }
+
+      return textResult(
+        `Pending action ${action.id} created: ${server.name}.${args.tool_name} is queued for the ` +
+          `owner's approval and will run only if approved. You will not see its result. Do not try to ` +
+          `make this call any other way — finish your remaining work and write your final answer.`,
+      );
+    },
+  );
+
   const notifyUser = tool(
     "notify_user",
     "Send a notification to the project owner. It appears in the web chat (in your thread) and is " +
@@ -468,6 +579,9 @@ export function buildFleetServer(ctx: FleetSessionContext): SdkMcpServerConfig {
     version: "1.0.0",
     tools: [
       proposeAction,
+      // Only advertised when something is actually gated — an agent that gates
+      // nothing has no use for it and should not pay for its description.
+      ...(gatedServers(agent.mcp_servers ?? []).length > 0 ? [proposeToolCall] : []),
       askAgent,
       // Task runs only: a chat turn has no parent task to aggregate into, and
       // the tool refuses there anyway — no reason to advertise it.

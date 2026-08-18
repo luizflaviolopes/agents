@@ -196,7 +196,10 @@ and extends `tasks.source` with `schedule` and `agent`.
 - **pending_actions** — approval-gated outbound actions. Agents **never send
   anything directly**. Lifecycle: an agent proposes an action via the
   `propose_action` MCP tool (writes a row with `action_type`
-  `slack_reply | slack_message | gmail_reply | gmail_send`, a human-readable
+  `slack_reply | slack_message | gmail_reply | gmail_send` — plus
+  `mcp_tool_call` from 0010, which has its own `propose_tool_call` tool and is
+  excluded from `propose_action`'s enum via `PROPOSABLE_ACTION_TYPES`), a
+  human-readable
   `preview`, and the exact `payload` the executor will send —
   `SlackActionPayload` / `GmailActionPayload`) → the user approves or rejects
   it in the web Review inbox or via Telegram inline buttons
@@ -211,15 +214,97 @@ and extends `tasks.source` with `schedule` and `agent`.
   voices are supported — each voice doc should state WHO it is and WHEN it
   applies in its own content, so the agent can pick the right voice per
   message.
-- **integrations** — per-project outbound credentials (`type: slack | gmail`,
-  `config` jsonb, unique per `(project_id, type)`), used ONLY by the worker's
-  deterministic action executor. LLM agents never hold send credentials —
-  read-side credentials for MCP servers are configured per-agent via
-  `agents.mcp_servers`, as before.
+- **integrations** — per-project outbound credentials (`type: slack | gmail |
+  github | notion`, `config` jsonb, unique per `(project_id, type)`), used
+  ONLY by the worker's deterministic action executor. LLM agents never hold
+  send credentials — read-side credentials for MCP servers are configured
+  per-agent via `agents.mcp_servers`. See "MCP approval gate" below for the
+  github/notion shape.
 - **ask_agent subtask flow** — an agent tool that creates a child task for a
   named agent in the same project (`source = 'agent'`, `parent_task_id` set
   to the caller's task). The child is executed through the normal queue; the
   calling agent polls the child task for completion and reads its `result`.
+
+## MCP approval gate (migration 0010)
+
+`supabase/migrations/0010_mcp_approval.sql` extends the `pending_actions`
+machinery from "the two things it had types for" (Slack, Gmail) to **any tool on
+any of an agent's MCP servers**, without a new action type per tool.
+
+Why it exists: an MCP write credential in `agents.mcp_servers` is a credential
+inside an LLM session, and agents read text written by people who are not the
+project owner (issue bodies, PR descriptions, Slack threads, Notion pages). So
+anything an agent reads can ask it to spend that credential.
+
+**Configuration** lives in the existing `agents.mcp_servers` jsonb (no DDL) —
+see `McpServerConfig` in `packages/shared/src/db-types.ts`:
+
+| Field | Meaning |
+|---|---|
+| `approval` | `'never'` (default, pre-0010 behaviour) or `'ask'` |
+| `askTools` | Tools to gate. **Empty/absent gates every tool** — allowing by omission is the dangerous direction |
+| `integration` | Project integration holding the write credential for approved calls |
+
+**The path a gated call takes:**
+
+1. `buildApprovalHooks` (`apps/worker/src/runner/approval-hook.ts`) installs a
+   **PreToolUse hook** on every session — task runs and direct chats alike. It
+   denies gated calls with a reason that tells the agent to propose instead.
+   PreToolUse runs *before* the permission system, so `bypassPermissions` does
+   not weaken it: this is a capability gate like the built-in tool limits in
+   0009, not an instruction. Agents with no gated servers get no `hooks` option
+   at all.
+2. `mcpApprovalRule` (`apps/worker/src/lib/mcp-approval.ts`) states the same
+   thing in the system prompt, so a well-behaved agent skips the wasted turn and
+   — importantly — orders its work with reads first.
+3. The agent calls the fleet tool **`propose_tool_call`** (server, tool,
+   arguments, and a plain-language `preview`). It exists as a tool rather than
+   as a silent interception precisely to get that preview: a hook can only see
+   `{server, tool, args}`, and an inbox of unreadable entries is an inbox that
+   gets approved blind. It writes a `pending_actions` row with
+   `action_type = 'mcp_tool_call'` and payload
+   `McpToolCallActionPayload` = `{ server, tool, arguments }`.
+4. The run ends in `review` (the existing `pendingActionsCreated` counter).
+5. On approval, `ActionExecutor.sendMcpToolCall` re-checks the policy (the row
+   may have waited while the config changed), resolves the write credential, and
+   `callMcpTool` (`apps/worker/src/actions/mcp-client.ts`) opens the worker's
+   **own MCP client** — stdio or http/sse — and forwards the frozen arguments.
+   No model is in the loop, and the target server validates the arguments
+   against its own input schema, which is why no per-tool schema exists here.
+6. Whatever the call returned is posted to the project chat by
+   `recordOutcome`.
+
+**Why deny rather than block until the owner answers:** approval arrives out of
+band and can take hours, while a blocked call would hold an SDK session and a
+slot from the bounded concurrency pool for that whole time (`ask_agent` already
+has to release its slot to avoid deadlocking on a 10-minute child). A scheduled
+3am run has nobody to ask at all. Denying keeps every run finite.
+
+**Credential isolation** is the part that matters more than the prompt. With
+`integration` set, the write token lives in `integrations` and reaches only the
+executor; the agent can hold a read-only one. `McpIntegrationConfig` says where
+the token goes, because that differs per transport — `headerName` (default
+`Authorization: Bearer <token>`) for http/sse, `envVar` for stdio — plus an
+optional `url`, needed when read-only is a property of the **endpoint** rather
+than the token (GitHub's `/mcp/readonly` refuses writes whatever the PAT). The
+agent points at the read-only endpoint; the executor at the write-capable one.
+
+**Known limits, by choice:**
+
+- **A gated proposal ends the run**, so the agent never sees the result and
+  cannot chain a write into later steps. Fine for a send, awkward mid-workflow;
+  the convention is reads first, gated writes last. A continuation task carrying
+  the result back would remove the limit and is deliberately not built yet.
+- **Nothing detects writes automatically.** Tool names are free-form, so no
+  heuristic can reliably separate writes from reads. The gate is exactly what is
+  configured; an empty `askTools` is the setting that stays correct on its own.
+- `pending_actions.action_type` **no longer has a CHECK constraint** — it grew
+  once per action type for no safety not already provided by the
+  `PendingActionType` union plus the executor's routing, on a table only the
+  service role can write. `status` keeps its CHECK: a closed lifecycle, not a
+  growing catalogue.
+
+Environment: `MCP_CALL_TIMEOUT_SECONDS` (default 120) bounds one approved call.
 
 `schedules` and `pending_actions` are in the `supabase_realtime` publication
 (worker wake-up hints, same as `tasks`). Shared contract: row types

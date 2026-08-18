@@ -16,6 +16,8 @@ import {
 } from "@agent-fleet/shared";
 import { buildAgentEnv, buildToolLimits } from "../lib/agent-env.js";
 import { logger, RunLogWriter } from "../lib/logger.js";
+import { mcpApprovalRule } from "../lib/mcp-approval.js";
+import { buildApprovalHooks } from "./approval-hook.js";
 import type { Semaphore } from "../lib/semaphore.js";
 import type { WorkspaceManager } from "../workspaces/manager.js";
 import {
@@ -158,6 +160,16 @@ export class TaskExecutor {
         model: agent.model || DEFAULT_MODEL,
         cwd,
         mcpServers,
+        // MCP approval gate (0010). Refuses gated tool calls in-session and
+        // points the agent at propose_tool_call; absent when the agent gates
+        // nothing.
+        ...buildApprovalHooks(agent.mcp_servers ?? [], (call) => {
+          void runLog.write("status", {
+            status: "mcp_call_denied",
+            mcp_server: call.server.name,
+            mcp_tool: call.tool,
+          });
+        }),
         permissionMode: "bypassPermissions",
         allowDangerouslySkipPermissions: true,
         settingSources: [],
@@ -751,6 +763,13 @@ function buildSystemPrompt(
 
   const instructions = agent.instructions?.trim();
   let prompt = instructions ? `${preamble}\n\n${instructions}` : preamble;
+
+  // The MCP approval gate (0010), as its own block rather than appended to the
+  // preamble: the PreToolUse hook only teaches this after a refused call has
+  // already cost a turn, and an agent that knows the shape up front can order
+  // its work so the gated write comes last.
+  const mcpRule = mcpApprovalRule(agent.mcp_servers ?? []);
+  if (mcpRule) prompt += `\n\n${mcpRule}`;
 
   const sections = knowledgeSections(knowledge);
   if (sections) prompt += `\n\n${sections}`;

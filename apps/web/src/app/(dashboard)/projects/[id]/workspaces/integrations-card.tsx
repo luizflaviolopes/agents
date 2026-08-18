@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { Mail, MessageSquare } from "lucide-react";
+import { FileText, Github, Mail, MessageSquare } from "lucide-react";
 import type { IntegrationType } from "@agent-fleet/shared";
 import { api } from "@/lib/api-client";
 import { Badge } from "@/components/ui/badge";
@@ -57,6 +57,8 @@ export function IntegrationsCard({ projectId }: { projectId: string }) {
 
   const slack = integrations?.find((i) => i.type === "slack");
   const gmail = integrations?.find((i) => i.type === "gmail");
+  const github = integrations?.find((i) => i.type === "github");
+  const notion = integrations?.find((i) => i.type === "notion");
 
   function onSaved(saved: IntegrationView) {
     setIntegrations((prev) =>
@@ -83,6 +85,28 @@ export function IntegrationsCard({ projectId }: { projectId: string }) {
           <GmailIntegrationForm
             projectId={projectId}
             view={gmail}
+            onSaved={onSaved}
+          />
+          <McpIntegrationForm
+            projectId={projectId}
+            type="github"
+            label="GitHub"
+            icon={Github}
+            tokenPlaceholder="github_pat_…"
+            envVarPlaceholder="GITHUB_PERSONAL_ACCESS_TOKEN"
+            writeUrlPlaceholder="https://api.githubcopilot.com/mcp/"
+            view={github}
+            onSaved={onSaved}
+          />
+          <McpIntegrationForm
+            projectId={projectId}
+            type="notion"
+            label="Notion"
+            icon={FileText}
+            tokenPlaceholder="ntn_…"
+            envVarPlaceholder="NOTION_TOKEN"
+            writeUrlPlaceholder="https://mcp.notion.com/mcp"
+            view={notion}
             onSaved={onSaved}
           />
         </div>
@@ -296,6 +320,159 @@ function GmailIntegrationForm({
         }
       >
         {busy ? "Saving…" : view?.configured ? "Replace credentials" : "Save"}
+      </Button>
+    </form>
+  );
+}
+
+/**
+ * Write credential for an MCP-reached integration (github/notion — 0010).
+ *
+ * These have no bespoke sender: the action executor connects to the MCP server
+ * the agent named and attaches this token to its own connection. So unlike
+ * Slack and Gmail, the config has to say WHERE the token goes — a header for a
+ * remote server, an environment variable for a stdio one.
+ *
+ * The point of keeping it here rather than on the agent is that the agent's
+ * session never holds it. Give the agent a read-only token and this one only
+ * ever exists inside the executor, so a prompt injection in an issue body has
+ * nothing to spend.
+ */
+function McpIntegrationForm({
+  projectId,
+  type,
+  label,
+  icon,
+  tokenPlaceholder,
+  envVarPlaceholder,
+  writeUrlPlaceholder,
+  view,
+  onSaved,
+}: {
+  projectId: string;
+  type: IntegrationType;
+  label: string;
+  icon: typeof MessageSquare;
+  tokenPlaceholder: string;
+  envVarPlaceholder: string;
+  writeUrlPlaceholder: string;
+  view: IntegrationView | undefined;
+  onSaved: (saved: IntegrationView) => void;
+}) {
+  const [writeToken, setWriteToken] = React.useState("");
+  const [headerName, setHeaderName] = React.useState("");
+  const [envVar, setEnvVar] = React.useState("");
+  const [url, setUrl] = React.useState("");
+  const [error, setError] = React.useState<string | null>(null);
+  const [busy, setBusy] = React.useState(false);
+
+  // headerName / envVar are not secrets — prefill them so replacing only the
+  // token doesn't silently drop them.
+  const loadedRef = React.useRef(false);
+  React.useEffect(() => {
+    if (loadedRef.current || !view?.configured) return;
+    loadedRef.current = true;
+    setHeaderName(configString(view, "headerName"));
+    setEnvVar(configString(view, "envVar"));
+    setUrl(configString(view, "url"));
+  }, [view]);
+
+  async function save(e: React.FormEvent) {
+    e.preventDefault();
+    setBusy(true);
+    setError(null);
+    try {
+      const saved = await putIntegration(projectId, type, {
+        writeToken: writeToken.trim(),
+        // Omit rather than send "" — the config schema is strict and an empty
+        // header name would be a header with no name.
+        ...(headerName.trim() ? { headerName: headerName.trim() } : {}),
+        ...(envVar.trim() ? { envVar: envVar.trim() } : {}),
+        ...(url.trim() ? { url: url.trim() } : {}),
+      });
+      onSaved(saved);
+      setWriteToken("");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to save");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <form onSubmit={save} className="space-y-3">
+      <SectionHeader icon={icon} label={label} view={view} />
+      <div className="space-y-2">
+        <Label htmlFor={`${type}-write-token`}>Write token</Label>
+        <Input
+          id={`${type}-write-token`}
+          type="password"
+          autoComplete="off"
+          placeholder={configString(view, "writeToken") || tokenPlaceholder}
+          value={writeToken}
+          onChange={(e) => setWriteToken(e.target.value)}
+        />
+      </div>
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+        <div className="space-y-2">
+          <Label htmlFor={`${type}-header-name`}>
+            Header name{" "}
+            <span className="font-normal text-muted-foreground">
+              (http/sse)
+            </span>
+          </Label>
+          <Input
+            id={`${type}-header-name`}
+            autoComplete="off"
+            placeholder="Authorization: Bearer …"
+            value={headerName}
+            onChange={(e) => setHeaderName(e.target.value)}
+          />
+        </div>
+        <div className="space-y-2">
+          <Label htmlFor={`${type}-env-var`}>
+            Env variable{" "}
+            <span className="font-normal text-muted-foreground">(stdio)</span>
+          </Label>
+          <Input
+            id={`${type}-env-var`}
+            autoComplete="off"
+            placeholder={envVarPlaceholder}
+            value={envVar}
+            onChange={(e) => setEnvVar(e.target.value)}
+          />
+        </div>
+      </div>
+      <div className="space-y-2">
+        <Label htmlFor={`${type}-write-url`}>
+          Write endpoint{" "}
+          <span className="font-normal text-muted-foreground">
+            (optional, http/sse)
+          </span>
+        </Label>
+        <Input
+          id={`${type}-write-url`}
+          autoComplete="off"
+          placeholder={writeUrlPlaceholder}
+          value={url}
+          onChange={(e) => setUrl(e.target.value)}
+        />
+      </div>
+      <p className="text-xs text-muted-foreground">
+        Used for approved <code>{type}</code> MCP calls from any agent whose
+        server points here. Leave the header name empty for the default{" "}
+        <code>Authorization: Bearer &lt;token&gt;</code>, which is what the
+        hosted GitHub and Notion MCP endpoints expect; a custom header receives
+        the token verbatim. A stdio server needs the env variable instead.
+      </p>
+      <p className="text-xs text-muted-foreground">
+        Set the write endpoint when read-only is a property of the URL rather
+        than of the token — point the agent at a read-only endpoint and put the
+        write-capable one here, and the agent cannot write even in principle.
+      </p>
+      {error && <p className="text-sm text-destructive">{error}</p>}
+      <Button type="submit" size="sm" disabled={busy || !writeToken.trim()}>
+        {busy ? "Saving…" : view?.configured ? "Replace token" : "Save"}
       </Button>
     </form>
   );

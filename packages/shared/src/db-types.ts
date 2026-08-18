@@ -55,7 +55,15 @@ export type PendingActionType =
   | "slack_reply"
   | "slack_message"
   | "gmail_reply"
-  | "gmail_send";
+  | "gmail_send"
+  /**
+   * One approval-gated call to one tool on one of the agent's MCP servers
+   * (0010). Deliberately generic: the payload names the server, the tool and
+   * the frozen arguments, and the executor forwards them over its own MCP
+   * client without knowing what the tool does — so gating a new server costs
+   * no new action type, no payload schema and no executor branch.
+   */
+  | "mcp_tool_call";
 
 export type PendingActionStatus =
   | "pending"
@@ -68,7 +76,19 @@ export type KnowledgeKind = "knowledge" | "voice";
 
 export type ScheduleKind = "interval" | "daily";
 
-export type IntegrationType = "slack" | "gmail";
+export type IntegrationType = "slack" | "gmail" | "github" | "notion";
+
+/**
+ * Approval policy for one MCP server (0010).
+ *
+ * - 'never' — the agent's tool calls run inline, in-session. The default, and
+ *   the behaviour of every server configured before 0010.
+ * - 'ask' — gated tool calls are denied inline by a PreToolUse hook and must
+ *   be routed through the fleet 'propose_tool_call' tool, which queues a
+ *   pending_action for the owner; the worker's deterministic executor makes
+ *   the call after approval.
+ */
+export type McpApprovalPolicy = "never" | "ask";
 
 // ---------------------------------------------------------------------------
 // JSONB payload shapes
@@ -92,6 +112,33 @@ export interface McpServerConfig {
    * `{ "Authorization": "Bearer <token>" }`.
    */
   headers?: Record<string, string>;
+  /**
+   * Approval policy for this server's tools (0010). Absent = 'never', so
+   * servers configured before 0010 keep their current behaviour.
+   */
+  approval?: McpApprovalPolicy;
+  /**
+   * Tool names that require approval when `approval` is 'ask'.
+   *
+   * EMPTY OR ABSENT GATES EVERY TOOL ON THE SERVER — the safe reading,
+   * because the dangerous direction is allowing by omission. Listing names
+   * narrows the gate to those tools, which makes it a snapshot: a tool the
+   * server gains later is NOT gated until someone adds it here. An empty list
+   * is the setting that stays correct without maintenance.
+   */
+  askTools?: string[];
+  /**
+   * When set, the executor authenticates its own call with the credential in
+   * the project integration of this type instead of the `env`/`headers`
+   * above (0010).
+   *
+   * This is what the gate is for: give the agent a read-only credential here
+   * and keep the write credential in the integration, where only
+   * deterministic code can reach it. Without it the owner is still asked to
+   * approve, but the write token also sits in the agent's session — one
+   * prompt injection away from being used unasked.
+   */
+  integration?: IntegrationType;
 }
 
 /** Payload for pending_actions of type 'slack_reply' | 'slack_message'. */
@@ -111,6 +158,22 @@ export interface GmailActionPayload {
   /** Set when replying to an existing thread ('gmail_reply'). */
   thread_id?: string;
   in_reply_to_message_id?: string;
+}
+
+/** Payload for pending_actions of type 'mcp_tool_call' (0010). */
+export interface McpToolCallActionPayload {
+  /** `name` of the entry in the proposing agent's mcp_servers. */
+  server: string;
+  /** Bare MCP tool name, without the SDK's `mcp__<server>__` prefix. */
+  tool: string;
+  /**
+   * Arguments exactly as the executor will send them. Frozen at proposal time
+   * and never edited on approval — approving means approving this call, so
+   * what was reviewed has to be what is sent. The target MCP server validates
+   * them against its own input schema, which is why no per-tool schema lives
+   * here.
+   */
+  arguments: Record<string, unknown>;
 }
 
 // ---------------------------------------------------------------------------
@@ -262,8 +325,8 @@ export interface PendingActionRow {
   action_type: PendingActionType;
   /** Human-readable summary shown for approval. */
   preview: string;
-  /** Exact data the executor will send (Slack/Gmail action payload). */
-  payload: SlackActionPayload | GmailActionPayload;
+  /** Exact data the executor will send, per action_type. */
+  payload: SlackActionPayload | GmailActionPayload | McpToolCallActionPayload;
   status: PendingActionStatus;
   error: string | null;
   decided_at: string | null;

@@ -1,5 +1,9 @@
 import { z } from "zod";
-import { DEFAULT_MODEL } from "./constants";
+import {
+  DEFAULT_MODEL,
+  INTEGRATION_TYPES,
+  MCP_APPROVAL_POLICIES,
+} from "./constants";
 
 // ---------------------------------------------------------------------------
 // API payload schemas (camelCase — API layer maps to snake_case DB columns)
@@ -42,6 +46,18 @@ export const mcpServerSchema = z.object({
   env: z.record(z.string()).optional(),
   /** http/sse only — request headers (e.g. an Authorization bearer token). */
   headers: z.record(z.string()).optional(),
+  /** Approval policy for this server's tools (0010). Omitted = 'never'. */
+  approval: z.enum(MCP_APPROVAL_POLICIES).optional(),
+  /**
+   * Tools requiring approval when approval is 'ask'. Omitted/empty gates
+   * every tool on the server — see McpServerConfig.askTools.
+   */
+  askTools: z.array(z.string().min(1).max(200)).max(200).optional(),
+  /**
+   * Project integration holding the write credential the executor should use
+   * for approved calls, instead of the env/headers above (0010).
+   */
+  integration: z.enum(INTEGRATION_TYPES).optional(),
 });
 export type McpServerInput = z.infer<typeof mcpServerSchema>;
 
@@ -220,8 +236,44 @@ export const gmailIntegrationConfigSchema = z.object({
 });
 export type GmailIntegrationConfig = z.infer<typeof gmailIntegrationConfigSchema>;
 
+/**
+ * Config for an integration that holds a write credential for an MCP server
+ * (github/notion — see MCP_INTEGRATION_TYPES). The credential is applied to
+ * the executor's OWN connection to the server, which is why it has to say
+ * where the token goes: a remote server takes it in a header, a stdio server
+ * in an environment variable.
+ */
+export const mcpIntegrationConfigSchema = z
+  .object({
+    writeToken: z.string().min(1),
+    /**
+     * http/sse: header carrying the token. Defaults to an
+     * `Authorization: Bearer <writeToken>` header, which is what GitHub's and
+     * Notion's hosted MCP endpoints expect.
+     */
+    headerName: z.string().min(1).max(120).optional(),
+    /** stdio: environment variable carrying the token, e.g. NOTION_TOKEN. */
+    envVar: z
+      .string()
+      .min(1)
+      .max(120)
+      .regex(/^[A-Za-z_][A-Za-z0-9_]*$/, "envVar must be a valid variable name")
+      .optional(),
+    /**
+     * http/sse: endpoint the executor should call instead of the agent's own
+     * `url`. Needed whenever read-only is a property of the ENDPOINT rather
+     * than of the token — GitHub's hosted MCP server is the case in point,
+     * where `/mcp/readonly` refuses writes no matter which PAT is presented.
+     * Without this, pointing an agent at the read-only URL (the right thing to
+     * do) would make every approved write fail against it.
+     */
+    url: z.string().url().optional(),
+  })
+  .strict();
+export type McpIntegrationConfig = z.infer<typeof mcpIntegrationConfigSchema>;
+
 export const upsertIntegrationSchema = z.object({
-  type: z.enum(["slack", "gmail"]),
+  type: z.enum(INTEGRATION_TYPES),
   /** Validated against the per-type config schema in the route handler. */
   config: z.record(z.unknown()),
 });

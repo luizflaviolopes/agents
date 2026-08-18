@@ -84,6 +84,9 @@ importers:
       '@anthropic-ai/claude-agent-sdk':
         specifier: ^0.3.228
         version: 0.3.228(@anthropic-ai/sdk@0.116.0(zod@3.25.76))(@modelcontextprotocol/sdk@1.30.0(zod@3.25.76))(zod@3.25.76)
+      '@modelcontextprotocol/sdk':
+        specifier: ^1.29.0
+        version: 1.30.0(zod@3.25.76)
       '@supabase/supabase-js':
         specifier: ^2.112.3
         version: 2.112.3
