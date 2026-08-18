@@ -1,8 +1,8 @@
 "use client";
 
 import * as React from "react";
-import { ArrowUp, ListTodo, Plus } from "lucide-react";
-import type { Agent, Task, TaskStatus } from "@agent-fleet/shared";
+import { ArrowUp, GitBranch, ListTodo, Plus } from "lucide-react";
+import type { Agent, Task, TaskSource, TaskStatus } from "@agent-fleet/shared";
 import { createTaskSchema } from "@agent-fleet/shared";
 import { api } from "@/lib/api-client";
 import { usePolling } from "@/lib/use-polling";
@@ -25,6 +25,20 @@ import { Textarea } from "@/components/ui/textarea";
 import { SourceBadge } from "@/components/badges";
 import { EmptyState } from "@/components/empty-state";
 import { TaskDetailDialog } from "./task-detail";
+
+/**
+ * Task sources the board hides by default.
+ *
+ * 'trigger' is the post-run knowledge sweep (0006): it is queued by the worker
+ * itself, coalesced per project, and covers activity from many runs — so it
+ * belongs to no single request and cannot be nested under one. It is the
+ * platform maintaining itself, which is not what the board is for. Every one
+ * of them is still on the Activity tab, and the toggle brings them back here.
+ *
+ * Note this is about *provenance*, not nesting: tasks with a parent are hidden
+ * separately (and shown inside their parent), whatever their source.
+ */
+const MACHINERY_SOURCES = new Set<TaskSource>(["trigger"]);
 
 const COLUMNS: { status: TaskStatus; label: string; dot: string }[] = [
   { status: "queued", label: "Queued", dot: "bg-zinc-400" },
@@ -61,6 +75,7 @@ export function Board({
 
   const [selectedTask, setSelectedTask] = React.useState<Task | null>(null);
   const [newTaskOpen, setNewTaskOpen] = React.useState(false);
+  const [showMachinery, setShowMachinery] = React.useState(false);
 
   const agentName = React.useCallback(
     (agentId: string | null) =>
@@ -92,14 +107,69 @@ export function Board({
       .catch(() => undefined);
   }, [initialTaskId, tasks]);
 
-  const visibleTasks = (tasks ?? []).filter((t) => t.status !== "cancelled");
+  // Children are grouped once and rendered inside their parent, never as
+  // board cards: an ask_agent question or one of a fan-out's units is part of
+  // the request the owner made, not a request of its own.
+  const liveTasks = (tasks ?? []).filter((t) => t.status !== "cancelled");
+
+  const childrenByParent = React.useMemo(() => {
+    const grouped = new Map<string, Task[]>();
+    for (const task of liveTasks) {
+      if (!task.parent_task_id) continue;
+      const siblings = grouped.get(task.parent_task_id);
+      if (siblings) siblings.push(task);
+      else grouped.set(task.parent_task_id, [task]);
+    }
+    return grouped;
+  }, [liveTasks]);
+
+  const topLevel = liveTasks.filter((t) => !t.parent_task_id);
+  const machineryCount = topLevel.filter((t) =>
+    MACHINERY_SOURCES.has(t.source),
+  ).length;
+  const visibleTasks = showMachinery
+    ? topLevel
+    : topLevel.filter((t) => !MACHINERY_SOURCES.has(t.source));
+
+  // An orphan is a child whose parent is not on this board — the parent was
+  // deleted, or it fell outside the 400-task page. Hiding it would lose it
+  // entirely, so it is promoted to a card rather than dropped.
+  const orphans = liveTasks.filter(
+    (t) => t.parent_task_id && !liveTasks.some((p) => p.id === t.parent_task_id),
+  );
+  const cards = [...visibleTasks, ...orphans];
 
   return (
     <div className="flex h-full flex-col px-4 py-4 sm:px-8 sm:py-6">
       <div className="mb-4 flex items-center justify-between gap-3 sm:mb-5">
         <p className="text-sm text-muted-foreground">
-          {visibleTasks.length} task{visibleTasks.length === 1 ? "" : "s"} on
-          the board — refreshes automatically
+          {cards.length} task{cards.length === 1 ? "" : "s"} on the board —
+          refreshes automatically
+          {machineryCount > 0 && !showMachinery && (
+            <>
+              {" · "}
+              <button
+                type="button"
+                onClick={() => setShowMachinery(true)}
+                className="underline underline-offset-2 hover:text-foreground"
+              >
+                show {machineryCount} system task
+                {machineryCount === 1 ? "" : "s"}
+              </button>
+            </>
+          )}
+          {showMachinery && machineryCount > 0 && (
+            <>
+              {" · "}
+              <button
+                type="button"
+                onClick={() => setShowMachinery(false)}
+                className="underline underline-offset-2 hover:text-foreground"
+              >
+                hide system tasks
+              </button>
+            </>
+          )}
         </p>
         <Button size="sm" onClick={() => setNewTaskOpen(true)}>
           <Plus />
@@ -113,7 +183,7 @@ export function Board({
             <Skeleton key={column.status} className="h-40" />
           ))}
         </div>
-      ) : visibleTasks.length === 0 ? (
+      ) : cards.length === 0 ? (
         <EmptyState
           icon={ListTodo}
           title="No tasks yet"
@@ -129,7 +199,7 @@ export function Board({
         // Mobile: one horizontally-snapping row of columns; md+: a grid.
         <div className="no-scrollbar -mx-4 flex flex-1 snap-x snap-mandatory items-start gap-3 overflow-x-auto px-4 sm:-mx-8 sm:px-8 md:mx-0 md:grid md:snap-none md:grid-cols-3 md:gap-4 md:overflow-visible md:px-0 xl:grid-cols-5">
           {COLUMNS.map((column) => {
-            const columnTasks = visibleTasks
+            const columnTasks = cards
               .filter((t) => t.status === column.status)
               .sort(
                 (a, b) =>
@@ -163,6 +233,12 @@ export function Board({
                       </div>
                       <div className="mt-2 flex flex-wrap items-center gap-1.5">
                         <SourceBadge source={task.source} />
+                        {(childrenByParent.get(task.id)?.length ?? 0) > 0 && (
+                          <span className="inline-flex items-center gap-0.5 rounded-md bg-muted px-1.5 py-0.5 text-xs text-muted-foreground">
+                            <GitBranch className="size-3" />
+                            {childrenByParent.get(task.id)!.length}
+                          </span>
+                        )}
                         {task.priority !== 0 && (
                           <span className="inline-flex items-center gap-0.5 rounded-md bg-muted px-1.5 py-0.5 text-xs text-muted-foreground">
                             <ArrowUp className="size-3" />
@@ -197,6 +273,9 @@ export function Board({
 
       <TaskDetailDialog
         task={selectedTask}
+        childTasks={
+          selectedTask ? (childrenByParent.get(selectedTask.id) ?? []) : []
+        }
         agentName={agentName(selectedTask?.agent_id ?? null)}
         onClose={() => setSelectedTask(null)}
         onTaskChanged={refresh}

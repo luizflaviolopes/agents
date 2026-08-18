@@ -6,6 +6,7 @@ import {
   ChevronDown,
   ChevronRight,
   CircleSlash,
+  CornerDownRight,
   History,
   Inbox,
 } from "lucide-react";
@@ -33,14 +34,43 @@ import {
   SourceBadge,
   TaskStatusBadge,
 } from "@/components/badges";
+import { Markdown } from "@/components/markdown";
+
+/**
+ * The newest result across a task and its children.
+ *
+ * Needed because for fanned-out work the parent's own result is not the
+ * answer: the parent finishes as soon as it has queued its children ("queued
+ * 7 reviews"), and the real output lands later on the 'fanin' aggregation
+ * task, which is one of those children (0008). Showing `task.result` alone
+ * would present the stale placeholder as the outcome.
+ *
+ * Ordering is by `finished_at` and falls back to `updated_at`, because a task
+ * that ended without a finish timestamp (cancelled, or crashed before the
+ * executor wrote one) would otherwise sort as oldest and win nothing.
+ */
+function newestResult(task: Task, children: Task[]): Task | null {
+  const withResult = [task, ...children].filter(
+    (candidate) => (candidate.result ?? "").trim().length > 0,
+  );
+  if (withResult.length === 0) return null;
+  return withResult.sort((a, b) =>
+    (b.finished_at ?? b.updated_at ?? "").localeCompare(
+      a.finished_at ?? a.updated_at ?? "",
+    ),
+  )[0];
+}
 
 export function TaskDetailDialog({
   task,
+  childTasks,
   agentName,
   onClose,
   onTaskChanged,
 }: {
   task: Task | null;
+  /** Tasks whose `parent_task_id` is this task — sub-agent questions, fanned-out work, the aggregation. */
+  childTasks: Task[];
   agentName: string | null;
   onClose: () => void;
   onTaskChanged: () => void;
@@ -70,10 +100,15 @@ export function TaskDetailDialog({
 
   return (
     <Dialog open={Boolean(task)} onOpenChange={(open) => !open && onClose()}>
-      <DialogContent className="max-w-2xl">
+      {/* Wider and taller than the default dialog: this one carries a full
+          review verdict — headings, tables, sub-task results — and at
+          max-w-2xl/60vh it showed a few lines at a time. Height is capped
+          against the overlay's top offset (8vh on sm+, 4dvh below) so the
+          shell never overflows the viewport it is centred in. */}
+      <DialogContent className="flex max-h-[90dvh] w-full max-w-5xl flex-col sm:max-h-[84vh]">
         {task && (
           <>
-            <DialogHeader className="pr-8">
+            <DialogHeader className="shrink-0 pr-8">
               <DialogTitle className="leading-snug">{task.title}</DialogTitle>
               <div className="flex flex-wrap items-center gap-1.5 pt-1">
                 <TaskStatusBadge status={task.status} />
@@ -86,7 +121,9 @@ export function TaskDetailDialog({
               </div>
             </DialogHeader>
 
-            <div className="max-h-[60vh] space-y-5 overflow-y-auto pr-1">
+            {/* min-h-0 is what lets a flex child actually shrink and scroll —
+                without it the body grows past the shell's max height. */}
+            <div className="min-h-0 flex-1 space-y-5 overflow-y-auto pr-1">
               {task.status === "review" && (
                 <Link
                   href={`/projects/${task.project_id}/review`}
@@ -97,28 +134,23 @@ export function TaskDetailDialog({
                 </Link>
               )}
 
+              <ResultSection task={task} childTasks={childTasks} />
+
               <section>
                 <h3 className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
                   Description
                 </h3>
-                <p className="whitespace-pre-wrap text-sm">
-                  {task.description || (
-                    <span className="text-muted-foreground">
-                      No description
-                    </span>
-                  )}
-                </p>
+                {task.description ? (
+                  <Markdown className="text-sm">{task.description}</Markdown>
+                ) : (
+                  <p className="text-sm text-muted-foreground">
+                    No description
+                  </p>
+                )}
               </section>
 
-              {task.result && (
-                <section>
-                  <h3 className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                    Result
-                  </h3>
-                  <div className="whitespace-pre-wrap rounded-lg border border-border bg-muted/40 p-3 text-sm">
-                    {task.result}
-                  </div>
-                </section>
+              {childTasks.length > 0 && (
+                <SubTasksSection tasks={childTasks} />
               )}
 
               {/* Keyed by task id so runs never leak between tasks. */}
@@ -126,7 +158,7 @@ export function TaskDetailDialog({
             </div>
 
             {task.status === "queued" && (
-              <div className="mt-4 flex flex-col items-end gap-2 border-t border-border pt-4">
+              <div className="mt-4 flex shrink-0 flex-col items-end gap-2 border-t border-border pt-4">
                 {cancelError && (
                   <p className="text-sm text-destructive">{cancelError}</p>
                 )}
@@ -145,6 +177,102 @@ export function TaskDetailDialog({
         )}
       </DialogContent>
     </Dialog>
+  );
+}
+
+/**
+ * The task's outcome, rendered first because it is what the owner opened the
+ * dialog for. Falls back to the newest child result when the parent's own is
+ * stale or absent — see `newestResult`.
+ */
+function ResultSection({
+  task,
+  childTasks,
+}: {
+  task: Task;
+  childTasks: Task[];
+}) {
+  const source = newestResult(task, childTasks);
+  if (!source) return null;
+  const fromChild = source.id !== task.id;
+
+  return (
+    <section>
+      <h3 className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+        Result
+      </h3>
+      {fromChild && (
+        <p className="mb-1.5 flex items-center gap-1.5 text-xs text-muted-foreground">
+          <CornerDownRight className="size-3.5 shrink-0" />
+          <span className="truncate">from sub-task “{source.title}”</span>
+        </p>
+      )}
+      <div className="rounded-lg border border-border bg-muted/40 p-3 text-sm">
+        <Markdown>{source.result ?? ""}</Markdown>
+      </div>
+    </section>
+  );
+}
+
+/**
+ * Work this task spawned: `ask_agent` questions, fanned-out units, and the
+ * aggregation run. These are hidden from the board on purpose — they are
+ * machinery of the task the owner asked for, not separate requests — so this
+ * is the only place they are visible outside the Activity tab.
+ */
+function SubTasksSection({ tasks }: { tasks: Task[] }) {
+  const ordered = [...tasks].sort((a, b) =>
+    (a.created_at ?? "").localeCompare(b.created_at ?? ""),
+  );
+
+  return (
+    <section>
+      <h3 className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+        Sub-tasks ({ordered.length})
+      </h3>
+      <div className="space-y-2">
+        {ordered.map((task) => (
+          <SubTaskItem key={task.id} task={task} />
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function SubTaskItem({ task }: { task: Task }) {
+  const [expanded, setExpanded] = React.useState(false);
+  const result = (task.result ?? "").trim();
+
+  return (
+    <div className="overflow-hidden rounded-lg border border-border">
+      <button
+        type="button"
+        onClick={() => setExpanded((open) => !open)}
+        disabled={result.length === 0}
+        className={cn(
+          "flex w-full items-center gap-2 bg-card px-3 py-2 text-left transition-colors",
+          result.length > 0 ? "hover:bg-accent/50" : "cursor-default",
+        )}
+      >
+        {result.length > 0 ? (
+          expanded ? (
+            <ChevronDown className="size-4 shrink-0 text-muted-foreground" />
+          ) : (
+            <ChevronRight className="size-4 shrink-0 text-muted-foreground" />
+          )
+        ) : (
+          <span className="size-4 shrink-0" />
+        )}
+        <TaskStatusBadge status={task.status} />
+        <span className="min-w-0 flex-1 truncate text-sm">{task.title}</span>
+        <SourceBadge source={task.source} />
+      </button>
+      {expanded && result.length > 0 && (
+        <div className="border-t border-border bg-background/60 p-3 text-sm">
+          <Markdown>{result}</Markdown>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -250,7 +378,7 @@ function RunItem({ run }: { run: TaskRun }) {
         </div>
       )}
       {expanded && (
-        <div className="max-h-80 space-y-2 overflow-y-auto border-t border-border bg-background/60 p-3">
+        <div className="max-h-[26rem] space-y-2 overflow-y-auto border-t border-border bg-background/60 p-3">
           {logs === undefined ? (
             <>
               <Skeleton className="h-4 w-3/4" />

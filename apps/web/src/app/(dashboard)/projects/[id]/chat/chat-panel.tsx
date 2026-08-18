@@ -13,6 +13,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
 import { RoleBadge } from "@/components/badges";
 import { EmptyState } from "@/components/empty-state";
+import { Markdown } from "@/components/markdown";
 
 /**
  * Project chat with one thread per conversation partner (0005): the manager
@@ -221,7 +222,14 @@ function ChatThread({
                     : "rounded-bl-sm border border-border bg-card",
                 )}
               >
-                <div className="whitespace-pre-wrap">{message.content}</div>
+                {/* The user's own text is echoed verbatim — they typed it, and
+                    rendering it as markdown would restyle their message back
+                    at them. Agent replies are markdown by default. */}
+                {message.sender === "user" ? (
+                  <div className="whitespace-pre-wrap">{message.content}</div>
+                ) : (
+                  <Markdown>{message.content}</Markdown>
+                )}
                 <div
                   className={cn(
                     "mt-1 flex items-center gap-1.5 text-[10px]",

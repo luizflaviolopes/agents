@@ -79,6 +79,12 @@ agents.
   agent that curates everything the fleet knows. The guide covers what you
   still have to supply: the Notion integration, the schedules and the
   grounding knowledge docs.
+- **Ticket review pipeline (Notion → GitHub)** —
+  [docs/TICKET-REVIEW-PIPELINE.md](docs/TICKET-REVIEW-PIPELINE.md): paste a
+  Notion ticket URL and get every pull request linked from it reviewed
+  together, so the cross-service seams get reviewed and not just each PR on its
+  own. One agent on two read-only credentials, with a fan-out-by-service mode
+  for oversized tickets.
 
 ## Repository layout
 
