@@ -25,6 +25,11 @@ interface WorkerConfig {
   serviceRoleKey: string;
   anthropicApiKey: string;
   telegramBotToken?: string;
+  /**
+   * Fallback clone credential for projects with no github integration. The
+   * per-project `cloneToken` is preferred — see
+   * `WorkspaceManager.resolveCloneToken`.
+   */
   githubToken?: string;
   workspacesRoot: string;
   /** Enqueue a coalesced librarian knowledge sweep when a run finishes (0006). */

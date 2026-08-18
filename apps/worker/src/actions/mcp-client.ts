@@ -5,7 +5,7 @@ import {
   getDefaultEnvironment,
 } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import type { McpIntegrationConfig, McpServerConfig } from "@agent-fleet/shared";
+import type { McpServerConfig, McpWriteCredential } from "@agent-fleet/shared";
 import { logger } from "../lib/logger.js";
 
 /**
@@ -50,7 +50,7 @@ export async function callMcpTool(
   server: McpServerConfig,
   tool: string,
   args: Record<string, unknown>,
-  credential: McpIntegrationConfig | null,
+  credential: McpWriteCredential | null,
 ): Promise<string> {
   const transport = buildTransport(server, credential);
   const client = new Client(
@@ -95,7 +95,7 @@ export async function callMcpTool(
 }
 
 /** Builds the transport for `server`, with the credential applied. */
-function buildTransport(server: McpServerConfig, credential: McpIntegrationConfig | null) {
+function buildTransport(server: McpServerConfig, credential: McpWriteCredential | null) {
   if (server.type === "stdio") {
     if (!server.command) {
       throw new Error(
@@ -144,7 +144,7 @@ function buildTransport(server: McpServerConfig, credential: McpIntegrationConfi
  */
 function credentialEnv(
   server: McpServerConfig,
-  credential: McpIntegrationConfig | null,
+  credential: McpWriteCredential | null,
 ): Record<string, string> {
   if (!credential) return {};
   if (!credential.envVar) {
@@ -166,7 +166,7 @@ function credentialEnv(
  */
 function credentialHeaders(
   _server: McpServerConfig,
-  credential: McpIntegrationConfig | null,
+  credential: McpWriteCredential | null,
 ): Record<string, string> {
   if (!credential) return {};
   return credential.headerName

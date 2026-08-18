@@ -237,15 +237,27 @@ export const gmailIntegrationConfigSchema = z.object({
 export type GmailIntegrationConfig = z.infer<typeof gmailIntegrationConfigSchema>;
 
 /**
- * Config for an integration that holds a write credential for an MCP server
- * (github/notion — see MCP_INTEGRATION_TYPES). The credential is applied to
- * the executor's OWN connection to the server, which is why it has to say
- * where the token goes: a remote server takes it in a header, a stdio server
- * in an environment variable.
+ * Config for a github/notion integration (see MCP_INTEGRATION_TYPES). Holds
+ * up to two credentials, both read only by server-side code and never by an
+ * agent session:
+ *
+ * - `writeToken` — applied to the executor's OWN connection to the MCP server
+ *   after an approval (0010), which is why the config has to say where the
+ *   token goes: a remote server takes it in a header, a stdio server in an
+ *   environment variable.
+ * - `cloneToken` — github only: the read-only PAT `WorkspaceManager` clones
+ *   this project's private repos with. Per project rather than per agent
+ *   because a workspace is cloned once and read by however many agents point
+ *   at it; the credential belongs to the checkout, not to the reader.
+ *
+ * Either alone is a valid configuration — a project can clone repos without
+ * gating any MCP writes, or gate writes without owning a workspace.
  */
 export const mcpIntegrationConfigSchema = z
   .object({
-    writeToken: z.string().min(1),
+    writeToken: z.string().min(1).optional(),
+    /** github only: read-only PAT for cloning workspace repos (`Contents: Read`). */
+    cloneToken: z.string().min(1).optional(),
     /**
      * http/sse: header carrying the token. Defaults to an
      * `Authorization: Bearer <writeToken>` header, which is what GitHub's and
@@ -269,8 +281,19 @@ export const mcpIntegrationConfigSchema = z
      */
     url: z.string().url().optional(),
   })
-  .strict();
+  .strict()
+  .refine((config) => Boolean(config.writeToken || config.cloneToken), {
+    message: "Provide a writeToken, a cloneToken, or both",
+  });
 export type McpIntegrationConfig = z.infer<typeof mcpIntegrationConfigSchema>;
+
+/**
+ * An McpIntegrationConfig already checked to carry a write token — what the
+ * action executor's own MCP connection needs. `writeToken` is optional on the
+ * schema so a clone-only integration validates, so the check happens once in
+ * `loadMcpCredential` rather than at every use site.
+ */
+export type McpWriteCredential = McpIntegrationConfig & { writeToken: string };
 
 export const upsertIntegrationSchema = z.object({
   type: z.enum(INTEGRATION_TYPES),

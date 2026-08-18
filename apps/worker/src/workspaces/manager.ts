@@ -22,7 +22,12 @@ export class WorkspaceManager {
   constructor(
     private readonly supabase: SupabaseClient,
     private readonly workspacesRoot: string,
-    private readonly githubToken?: string,
+    /**
+     * Worker-wide GITHUB_TOKEN, used only for projects with no github
+     * integration. Prefer the per-project `cloneToken` — see
+     * `resolveCloneToken`.
+     */
+    private readonly fallbackToken?: string,
   ) {}
 
   /** Absolute path of a workspace directory. */
@@ -62,8 +67,12 @@ export class WorkspaceManager {
   private async cloneRepo(repo: WorkspaceRepo): Promise<void> {
     const wsDir = this.workspaceDir(repo.workspace_id);
     const targetDir = path.join(wsDir, repo.folder_name);
+    // Resolved inside the try so a lookup failure is recorded on the row like
+    // any other clone failure, but declared out here so the catch can redact.
+    let token: string | undefined;
 
     try {
+      token = await this.resolveCloneToken(repo.workspace_id);
       await mkdir(wsDir, { recursive: true });
 
       // Already on disk (e.g. from a previous run) — just mark it ready.
@@ -74,7 +83,7 @@ export class WorkspaceManager {
 
       await this.setCloneStatus(repo.id, "cloning", null);
 
-      const cloneUrl = this.injectToken(repo.repo_url);
+      const cloneUrl = this.injectToken(repo.repo_url, token);
       logger.info(
         "workspaces",
         `cloning ${repo.repo_url} (branch ${repo.branch}) into ${targetDir}`,
@@ -90,10 +99,62 @@ export class WorkspaceManager {
       await this.setCloneStatus(repo.id, "ready", null);
       logger.info("workspaces", `repo ${repo.folder_name} ready in workspace ${repo.workspace_id}`);
     } catch (err) {
-      const message = this.redactToken(errorMessage(err)).slice(0, 4000);
+      const message = redactToken(errorMessage(err), token).slice(0, 4000);
       logger.error("workspaces", `clone failed for ${repo.repo_url}: ${message}`);
       await this.setCloneStatus(repo.id, "error", message);
     }
+  }
+
+  /**
+   * The read-only PAT this workspace's repos clone with: the owning project's
+   * github integration `cloneToken`, falling back to the worker-wide
+   * GITHUB_TOKEN when the project has no integration.
+   *
+   * Per project rather than per agent on purpose. A workspace is cloned once
+   * into one directory and read by however many agents point at it, so a
+   * per-agent token would mean whichever agent ran first decided what everyone
+   * else reads. The credential belongs to the checkout, not to the reader.
+   *
+   * Resolved per clone rather than cached, so rotating a project's token takes
+   * effect on the next clone instead of the next worker restart. Clones are
+   * rare; two queries are cheaper than a staleness bug.
+   */
+  private async resolveCloneToken(workspaceId: string): Promise<string | undefined> {
+    const { data: workspace, error: wsError } = await this.supabase
+      .from("workspaces")
+      .select("project_id")
+      .eq("id", workspaceId)
+      .maybeSingle();
+    if (wsError) {
+      logger.warn(
+        "workspaces",
+        `failed to resolve project for workspace ${workspaceId}: ${wsError.message}`,
+      );
+      return this.fallbackToken;
+    }
+
+    const projectId = (workspace as { project_id?: string } | null)?.project_id;
+    if (!projectId) return this.fallbackToken;
+
+    const { data, error } = await this.supabase
+      .from("integrations")
+      .select("config")
+      .eq("project_id", projectId)
+      .eq("type", "github")
+      .maybeSingle();
+    if (error) {
+      logger.warn(
+        "workspaces",
+        `failed to load the github integration for project ${projectId}: ${error.message}`,
+      );
+      return this.fallbackToken;
+    }
+
+    const config = (data as { config?: Record<string, unknown> } | null)?.config;
+    const cloneToken = config?.cloneToken;
+    return typeof cloneToken === "string" && cloneToken.length > 0
+      ? cloneToken
+      : this.fallbackToken;
   }
 
   private async setCloneStatus(repoId: string, status: string, errorText: string | null): Promise<void> {
@@ -110,18 +171,12 @@ export class WorkspaceManager {
     }
   }
 
-  /** Injects GITHUB_TOKEN into https GitHub clone URLs for private repos. */
-  private injectToken(repoUrl: string): string {
-    if (!this.githubToken) return repoUrl;
+  /** Injects the clone token into https GitHub clone URLs for private repos. */
+  private injectToken(repoUrl: string, token: string | undefined): string {
+    if (!token) return repoUrl;
     const match = /^https:\/\/github\.com\/(.+)$/i.exec(repoUrl.trim());
     if (!match) return repoUrl;
-    return `https://x-access-token:${this.githubToken}@github.com/${match[1]}`;
-  }
-
-  /** Ensures the token never leaks into stored error messages or logs. */
-  private redactToken(text: string): string {
-    if (!this.githubToken) return text;
-    return text.split(this.githubToken).join("***");
+    return `https://x-access-token:${token}@github.com/${match[1]}`;
   }
 
   /** Periodic sweep that clones any pending repos across all workspaces. */
@@ -163,6 +218,16 @@ export class WorkspaceManager {
       this.sweeping = false;
     }
   }
+}
+
+/**
+ * Ensures the clone token never leaks into a stored error message or a log
+ * line — `workspace_repos.error` is rendered in the workspaces panel, and git
+ * echoes the remote URL on failure.
+ */
+function redactToken(text: string, token: string | undefined): string {
+  if (!token) return text;
+  return text.split(token).join("***");
 }
 
 function errorMessage(err: unknown): string {

@@ -95,6 +95,7 @@ export function IntegrationsCard({ projectId }: { projectId: string }) {
             tokenPlaceholder="github_pat_…"
             envVarPlaceholder="GITHUB_PERSONAL_ACCESS_TOKEN"
             writeUrlPlaceholder="https://api.githubcopilot.com/mcp/"
+            cloneTokenPlaceholder="github_pat_… (Contents: Read)"
             view={github}
             onSaved={onSaved}
           />
@@ -346,6 +347,7 @@ function McpIntegrationForm({
   tokenPlaceholder,
   envVarPlaceholder,
   writeUrlPlaceholder,
+  cloneTokenPlaceholder,
   view,
   onSaved,
 }: {
@@ -356,10 +358,13 @@ function McpIntegrationForm({
   tokenPlaceholder: string;
   envVarPlaceholder: string;
   writeUrlPlaceholder: string;
+  /** github only: shows the clone-token field when set. */
+  cloneTokenPlaceholder?: string;
   view: IntegrationView | undefined;
   onSaved: (saved: IntegrationView) => void;
 }) {
   const [writeToken, setWriteToken] = React.useState("");
+  const [cloneToken, setCloneToken] = React.useState("");
   const [headerName, setHeaderName] = React.useState("");
   const [envVar, setEnvVar] = React.useState("");
   const [url, setUrl] = React.useState("");
@@ -383,15 +388,18 @@ function McpIntegrationForm({
     setError(null);
     try {
       const saved = await putIntegration(projectId, type, {
-        writeToken: writeToken.trim(),
-        // Omit rather than send "" — the config schema is strict and an empty
-        // header name would be a header with no name.
+        // Omit rather than send "" — the config schema is strict, an empty
+        // header name would be a header with no name, and an omitted secret
+        // means "keep the stored one" (the route carries it over).
+        ...(writeToken.trim() ? { writeToken: writeToken.trim() } : {}),
+        ...(cloneToken.trim() ? { cloneToken: cloneToken.trim() } : {}),
         ...(headerName.trim() ? { headerName: headerName.trim() } : {}),
         ...(envVar.trim() ? { envVar: envVar.trim() } : {}),
         ...(url.trim() ? { url: url.trim() } : {}),
       });
       onSaved(saved);
       setWriteToken("");
+      setCloneToken("");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to save");
     } finally {
@@ -413,6 +421,24 @@ function McpIntegrationForm({
           onChange={(e) => setWriteToken(e.target.value)}
         />
       </div>
+      {cloneTokenPlaceholder && (
+        <div className="space-y-2">
+          <Label htmlFor={`${type}-clone-token`}>
+            Clone token{" "}
+            <span className="font-normal text-muted-foreground">
+              (optional, read-only)
+            </span>
+          </Label>
+          <Input
+            id={`${type}-clone-token`}
+            type="password"
+            autoComplete="off"
+            placeholder={configString(view, "cloneToken") || cloneTokenPlaceholder}
+            value={cloneToken}
+            onChange={(e) => setCloneToken(e.target.value)}
+          />
+        </div>
+      )}
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
         <div className="space-y-2">
           <Label htmlFor={`${type}-header-name`}>
@@ -470,9 +496,25 @@ function McpIntegrationForm({
         than of the token — point the agent at a read-only endpoint and put the
         write-capable one here, and the agent cannot write even in principle.
       </p>
+      {cloneTokenPlaceholder && (
+        <p className="text-xs text-muted-foreground">
+          The clone token is what the worker clones this project&apos;s
+          workspace repos with — a separate, read-only PAT needing only{" "}
+          <code>Contents: Read</code>. It never enters an agent session; agents
+          only ever see the checkout. Leave a token field blank to keep the one
+          already saved.
+        </p>
+      )}
       {error && <p className="text-sm text-destructive">{error}</p>}
-      <Button type="submit" size="sm" disabled={busy || !writeToken.trim()}>
-        {busy ? "Saving…" : view?.configured ? "Replace token" : "Save"}
+      <Button
+        type="submit"
+        size="sm"
+        disabled={
+          busy ||
+          (!view?.configured && !writeToken.trim() && !cloneToken.trim())
+        }
+      >
+        {busy ? "Saving…" : "Save"}
       </Button>
     </form>
   );

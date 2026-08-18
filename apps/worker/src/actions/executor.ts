@@ -7,9 +7,9 @@ import {
   type GmailActionPayload,
   type IntegrationRow,
   type IntegrationType,
-  type McpIntegrationConfig,
   type McpServerConfig,
   type McpToolCallActionPayload,
+  type McpWriteCredential,
   type PendingActionRow,
   type SlackActionPayload,
 } from "@agent-fleet/shared";
@@ -268,7 +268,7 @@ export class ActionExecutor {
   private async loadMcpCredential(
     projectId: string,
     server: McpServerConfig,
-  ): Promise<McpIntegrationConfig | null> {
+  ): Promise<McpWriteCredential | null> {
     if (!server.integration) return null;
     const type: IntegrationType = server.integration;
 
@@ -296,7 +296,19 @@ export class ActionExecutor {
           `(plus 'envVar' for a stdio server). Reconfigure it in the project's integration settings.`,
       );
     }
-    return parsed.data;
+
+    // writeToken is optional on the schema so a clone-only github integration
+    // validates. This path needs one, so say which half is missing rather than
+    // failing later inside the MCP client.
+    const { writeToken } = parsed.data;
+    if (!writeToken) {
+      throw new Error(
+        `MCP server "${server.name}" is configured to use the ${type} integration's write token, ` +
+          `but that integration only has a cloneToken. Add a writeToken in the project's ` +
+          `integration settings.`,
+      );
+    }
+    return { ...parsed.data, writeToken };
   }
 
   // ------------------------------------------------------------------ slack
