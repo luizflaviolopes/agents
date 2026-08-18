@@ -21,6 +21,7 @@ import {
   buildFleetServer,
   buildMcpServers,
   findLibrarian,
+  KNOWLEDGE_SEARCH_RULE,
   knowledgeSections,
   librarianForwardingRule,
   loadKnowledgeBundle,
@@ -602,6 +603,7 @@ function buildSystemPrompt(
     `Never send Slack messages or emails yourself: propose them with the fleet propose_action ` +
     `tool — they are only sent after the user approves them. You can send the project owner a ` +
     `direct heads-up at any time with the notify_user tool.`;
+  preamble += ` ${KNOWLEDGE_SEARCH_RULE}`;
   if (librarianRule) preamble += ` ${librarianRule}`;
 
   const instructions = agent.instructions?.trim();

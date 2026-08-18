@@ -22,6 +22,7 @@ import {
   buildFleetServer,
   buildMcpServers,
   findLibrarian,
+  KNOWLEDGE_SEARCH_RULE,
   knowledgeSections,
   librarianForwardingRule,
   loadKnowledgeBundle,
@@ -660,6 +661,7 @@ function buildChatSystemPrompt(agent: Agent, knowledge: string, librarianRule: s
     `tool — they are only sent after the user approves them. You can consult other agents with ` +
     `ask_agent. Always finish by calling reply_to_user exactly once with your full answer — ` +
     `never end your turn without replying.`;
+  preamble += ` ${KNOWLEDGE_SEARCH_RULE}`;
   if (librarianRule) preamble += ` ${librarianRule}`;
 
   const instructions = agent.instructions?.trim();

@@ -34,6 +34,23 @@ const ACTIVITY_DEFAULT_LOOKBACK_MS = 72 * 60 * 60 * 1000;
  */
 const KNOWLEDGE_DOC_MAX_CHARS = 12_000;
 
+/** search_knowledge: documents returned when the caller does not ask for a limit. */
+const SEARCH_DEFAULT_LIMIT = 8;
+/** search_knowledge: characters of context returned around each match. */
+const SEARCH_SNIPPET_CHARS = 300;
+/** read_knowledge: ceiling on one returned document (docs are capped well below this). */
+const KNOWLEDGE_READ_MAX_CHARS = 20_000;
+
+/**
+ * Preamble rule for every agent: the system prompt carries only part of the
+ * project's knowledge, so the rest has to be looked up rather than assumed.
+ */
+export const KNOWLEDGE_SEARCH_RULE =
+  "Only part of this project's knowledge is in your prompt. When you need a fact you do not have — " +
+  "who someone is, a decision that was made, a convention, how the team works — look it up with the " +
+  "search_knowledge tool (and read_knowledge for the full document) before guessing or reporting that " +
+  "you do not know.";
+
 /** Sends a text to the project owner's linked Telegram chat. */
 export type TelegramNotifier = (projectId: string, text: string) => Promise<void>;
 
@@ -323,6 +340,8 @@ export function buildFleetServer(ctx: FleetSessionContext): SdkMcpServerConfig {
       proposeAction,
       askAgent,
       notifyUser,
+      buildSearchKnowledgeTool(ctx),
+      buildReadKnowledgeTool(ctx),
       ...(replyToUser ? [replyToUser] : []),
       ...(agent.role === "librarian"
         ? [buildSaveKnowledgeTool(ctx), buildReadProjectActivityTool(ctx)]
@@ -527,6 +546,165 @@ function buildReadProjectActivityTool(ctx: FleetSessionContext) {
       return textResult(JSON.stringify({ since, messages, tasks }));
     },
   );
+}
+
+// ----------------------------------------------------- knowledge search (all)
+
+/**
+ * The rows one agent may search: the project's shared docs plus its own.
+ * Librarians curate everything, so they also see the other agents' docs —
+ * mirroring the write side, where only they get save_knowledge.
+ *
+ * Returned as a PostgREST `or()` string. Every interpolated value is a uuid,
+ * so nothing here can break the filter syntax.
+ */
+async function knowledgeScopeFilter(ctx: FleetSessionContext): Promise<string> {
+  const { supabase, agent, projectId } = ctx;
+  if (agent.role !== "librarian") {
+    return `project_id.eq.${projectId},agent_id.eq.${agent.id}`;
+  }
+  const agents = await listActiveAgents(supabase, projectId);
+  const ids = agents.map((a) => a.id);
+  return ids.length > 0
+    ? `project_id.eq.${projectId},agent_id.in.(${ids.join(",")})`
+    : `project_id.eq.${projectId}`;
+}
+
+function buildSearchKnowledgeTool(ctx: FleetSessionContext) {
+  const { supabase, agent } = ctx;
+
+  return tool(
+    "search_knowledge",
+    "Search this project's knowledge base — the team, decisions, conventions, current focus, and any " +
+      "docs scoped to you. Your system prompt carries only part of it, so use this whenever you need a " +
+      "fact you do not already have. Returns matching document titles with a snippet around the match; " +
+      "call read_knowledge for a full document.",
+    {
+      query: z.string().min(1).describe("Words to look for, e.g. 'deploy window' or 'who reviews PRs'"),
+      limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(20)
+        .optional()
+        .describe(`Maximum documents to return (default ${SEARCH_DEFAULT_LIMIT})`),
+    },
+    async (args) => {
+      const limit = args.limit ?? SEARCH_DEFAULT_LIMIT;
+      const scope = await knowledgeScopeFilter(ctx);
+
+      const ftsRes = await supabase
+        .from("agent_knowledge")
+        .select("*")
+        .or(scope)
+        .textSearch("search_vector", args.query, { type: "websearch", config: "simple" })
+        .limit(limit);
+
+      let docs: AgentKnowledgeRow[] = [];
+      if (ftsRes.error) {
+        // Most likely search_vector is missing because migration 0007 has not
+        // been applied yet. Not fatal — the substring pass below still answers.
+        logger.warn("fleet", `full-text knowledge search unavailable: ${ftsRes.error.message}`);
+      } else {
+        docs = (ftsRes.data ?? []) as AgentKnowledgeRow[];
+      }
+
+      // The index is unstemmed (config 'simple', so docs can be in any
+      // language), so "deploys" does not match "deploy". Fall back to
+      // substring matching over the documents this agent can see — there are
+      // few enough of them that filtering here is cheaper than a second
+      // stacked filter, and it covers partial words the tsquery misses.
+      if (docs.length === 0) {
+        const { data, error } = await supabase.from("agent_knowledge").select("*").or(scope);
+        if (error) return textResult(`Error searching knowledge: ${error.message}`);
+        const terms = args.query
+          .toLowerCase()
+          .split(/\s+/)
+          .filter((t) => t.length >= 3);
+        const visible = (data ?? []) as AgentKnowledgeRow[];
+        docs = visible
+          .filter((doc) => {
+            const haystack = `${doc.title}\n${doc.content}`.toLowerCase();
+            return terms.length > 0
+              ? terms.some((t) => haystack.includes(t))
+              : haystack.includes(args.query.trim().toLowerCase());
+          })
+          .slice(0, limit);
+      }
+
+      if (docs.length === 0) {
+        return textResult(
+          `No knowledge document matches "${args.query}". Try fewer or different words. If the fact ` +
+            `genuinely is not recorded, say so rather than inventing it.`,
+        );
+      }
+
+      const matches = docs.map((doc) => ({
+        title: doc.title,
+        scope: doc.project_id ? "project" : "agent",
+        kind: doc.kind,
+        chars: doc.content.length,
+        snippet: snippetAround(doc.content, args.query),
+      }));
+      logger.debug("fleet", `agent ${agent.name}: search_knowledge "${args.query}" → ${docs.length} doc(s)`);
+      return textResult(JSON.stringify({ query: args.query, matches }));
+    },
+  );
+}
+
+function buildReadKnowledgeTool(ctx: FleetSessionContext) {
+  const { supabase } = ctx;
+
+  return tool(
+    "read_knowledge",
+    "Read one knowledge document in full, by title (case-insensitive; a unique partial title also " +
+      "works). Use it after search_knowledge when a snippet is not enough.",
+    {
+      title: z.string().min(1).describe("Document title, as returned by search_knowledge"),
+    },
+    async (args) => {
+      const scope = await knowledgeScopeFilter(ctx);
+      const { data, error } = await supabase.from("agent_knowledge").select("*").or(scope);
+      if (error) return textResult(`Error loading knowledge: ${error.message}`);
+      const docs = (data ?? []) as AgentKnowledgeRow[];
+
+      const needle = args.title.trim().toLowerCase();
+      const doc =
+        docs.find((d) => d.title.trim().toLowerCase() === needle) ??
+        docs.find((d) => d.title.toLowerCase().includes(needle)) ??
+        null;
+      if (!doc) {
+        const titles = docs.map((d) => `"${d.title}"`).join(", ") || "(none)";
+        return textResult(
+          `Error: no knowledge document titled "${args.title}" is visible to you. Available: ${titles}`,
+        );
+      }
+
+      const scopeLabel = doc.project_id ? "project scope" : "agent scope";
+      return textResult(
+        `# ${doc.title}\n(${scopeLabel}, kind '${doc.kind}', updated ${doc.updated_at})\n\n` +
+          truncate(doc.content, KNOWLEDGE_READ_MAX_CHARS),
+      );
+    },
+  );
+}
+
+/** Content around the first matching term, so a hit does not cost the whole document. */
+function snippetAround(content: string, query: string): string {
+  const haystack = content.toLowerCase();
+  let at = -1;
+  for (const term of query.toLowerCase().split(/\s+/)) {
+    if (term.length < 3) continue;
+    const found = haystack.indexOf(term);
+    if (found >= 0 && (at < 0 || found < at)) at = found;
+  }
+  if (at < 0) return truncate(content, SEARCH_SNIPPET_CHARS);
+
+  const start = Math.max(0, at - Math.floor(SEARCH_SNIPPET_CHARS / 2));
+  const end = Math.min(content.length, start + SEARCH_SNIPPET_CHARS);
+  const lead = start > 0 ? "…" : "";
+  const tail = end < content.length ? "…" : "";
+  return `${lead}${content.slice(start, end).trim()}${tail}`;
 }
 
 // ----------------------------------------------------------------- knowledge

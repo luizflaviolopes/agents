@@ -395,6 +395,48 @@ Not covered: `ask_agent` forwarded-fact tasks (`source = 'agent'`) still insert
 directly, so one can overlap a sweep. That predates 0006; the trigger path
 never adds to it.
 
+## Knowledge search (migration 0007)
+
+Injection is O(all docs) per run: every project doc plus the agent's own docs
+are prepended to the system prompt on every task run and every chat turn, so
+the whole fleet pays for the whole knowledge base forever. `search_knowledge`
+adds the retrieval half — an agent can look up a fact it does not have instead
+of carrying every fact it might need. Injection is unchanged for now; this is
+the primitive the reduction depends on.
+
+`agent_knowledge.search_vector` is a **stored generated column**
+(`to_tsvector('simple', title || ' ' || content)`) with a GIN index
+(`agent_knowledge_search_idx`). Config `'simple'` rather than `'english'`
+because docs are written in whatever language the team uses and stemming the
+wrong language produces nonsense; the cost is no stemming at all, which the
+tool covers with a substring pass.
+
+Two tools, available to **all** agents in task runs and chat sessions
+(`buildFleetServer`, `apps/worker/src/runner/session.ts`):
+
+- `search_knowledge({ query, limit? })` — returns matching documents as
+  compact JSON: title, scope, kind, size, and a ~300-character snippet around
+  the first matching term. Snippets, not full documents — returning the whole
+  doc would just be injection with extra steps.
+- `read_knowledge({ title })` — one full document, matched by exact title then
+  unique prefix, capped at `KNOWLEDGE_READ_MAX_CHARS`.
+
+**Scope** (`knowledgeScopeFilter`) is the project's shared docs plus the
+calling agent's own; librarians also see the other agents' docs, mirroring the
+write side where only they get `save_knowledge`.
+
+**Two passes.** The tsquery runs first. If it errors — most likely because 0007
+has not been applied yet — that is logged, not returned, and the second pass
+answers anyway, so the code is safe to deploy before the migration. If it
+returns nothing, the second pass fetches the agent's visible docs and
+substring-matches in the worker; at this corpus size that is cheaper than
+stacking a second PostgREST filter, and it catches the partial words an
+unstemmed tsquery misses.
+
+Every agent's preamble gains `KNOWLEDGE_SEARCH_RULE`: the prompt holds only
+part of the project's knowledge, so look the rest up before guessing or
+reporting ignorance.
+
 ## Environment
 
 See `.env.example`: Supabase URL/keys, `ANTHROPIC_API_KEY`,
