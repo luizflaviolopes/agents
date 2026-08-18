@@ -301,16 +301,20 @@ function LogEntry({ log }: { log: RunLog }) {
   }
 
   if (log.event_type === "tool_use" || log.event_type === "tool_result") {
+    // The worker writes { tool, input } / { tool, output } — keep the older
+    // name/tool_name spellings as fallbacks so historical runs still label.
     const toolName =
-      typeof content.name === "string"
-        ? content.name
-        : typeof content.tool_name === "string"
-          ? content.tool_name
-          : log.event_type;
+      typeof content.tool === "string"
+        ? content.tool
+        : typeof content.name === "string"
+          ? content.name
+          : typeof content.tool_name === "string"
+            ? content.tool_name
+            : log.event_type;
     const payload =
       log.event_type === "tool_use"
         ? (content.input ?? content)
-        : (content.content ?? content.result ?? content);
+        : (content.output ?? content.content ?? content.result ?? content);
     return (
       <div className="overflow-hidden rounded-md border border-border">
         <div className="flex items-center gap-2 bg-muted/60 px-2 py-1">
