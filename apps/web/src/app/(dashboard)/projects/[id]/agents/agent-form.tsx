@@ -38,6 +38,17 @@ export interface AgentFormValue {
   workspaceId: string; // "" = no workspace
   plugins: string[];
   mcpServers: McpServerRow[];
+  /** Built-in tool limits (0009); empty = unrestricted. */
+  allowedTools: string[];
+  disallowedTools: string[];
+}
+
+/** "Bash, Write" ⇄ ["Bash", "Write"] for the tool-limit inputs. */
+export function parseToolList(raw: string): string[] {
+  return raw
+    .split(",")
+    .map((name) => name.trim())
+    .filter(Boolean);
 }
 
 export function emptyAgentForm(): AgentFormValue {
@@ -49,6 +60,8 @@ export function emptyAgentForm(): AgentFormValue {
     workspaceId: "",
     plugins: [],
     mcpServers: [],
+    allowedTools: [],
+    disallowedTools: [],
   };
 }
 
@@ -61,6 +74,8 @@ export function agentToForm(agent: Agent): AgentFormValue {
     workspaceId: agent.workspace_id ?? "",
     plugins: [...(agent.plugins ?? [])],
     mcpServers: (agent.mcp_servers ?? []).map(mcpConfigToRow),
+    allowedTools: [...(agent.allowed_tools ?? [])],
+    disallowedTools: [...(agent.disallowed_tools ?? [])],
   };
 }
 
@@ -305,6 +320,29 @@ export function AgentForm({
             ))}
           </div>
         )}
+      </div>
+
+      {/* Built-in tool limits (0009) */}
+      <div className="space-y-2">
+        <Label htmlFor="agent-allowed-tools">Tool limits</Label>
+        <Input
+          id="agent-allowed-tools"
+          placeholder="Only these built-in tools, e.g. Read, Grep, WebFetch (blank = all)"
+          value={value.allowedTools.join(", ")}
+          onChange={(e) => set("allowedTools", parseToolList(e.target.value))}
+        />
+        <Input
+          id="agent-disallowed-tools"
+          placeholder="Never these built-in tools, e.g. Bash, Write, Edit"
+          value={value.disallowedTools.join(", ")}
+          onChange={(e) => set("disallowedTools", parseToolList(e.target.value))}
+        />
+        <p className="text-xs text-muted-foreground">
+          Capability limits on Claude&apos;s built-in tools, enforced by the runtime rather than by
+          instructions. Agents that read untrusted text — tickets, PR descriptions, diffs — should not
+          have <code>Bash</code>. Fleet tools (notify_user, ask_agent, spawn_tasks) and MCP servers are
+          unaffected.
+        </p>
       </div>
 
       {/* MCP servers */}

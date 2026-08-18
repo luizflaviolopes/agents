@@ -397,12 +397,12 @@ never adds to it.
 
 ## Knowledge search (migration 0007)
 
-Injection is O(all docs) per run: every project doc plus the agent's own docs
-are prepended to the system prompt on every task run and every chat turn, so
-the whole fleet pays for the whole knowledge base forever. `search_knowledge`
-adds the retrieval half — an agent can look up a fact it does not have instead
-of carrying every fact it might need. Injection is unchanged for now; this is
-the primitive the reduction depends on.
+Injection used to be O(all docs) per run: every project doc plus the agent's
+own docs prepended to the system prompt on every task run and every chat turn,
+so the whole fleet paid for the whole knowledge base forever.
+`search_knowledge` adds the retrieval half — an agent looks up a fact it does
+not have instead of carrying every fact it might need. What the prompt still
+carries is described under "Knowledge injection" below.
 
 `agent_knowledge.search_vector` is a **stored generated column**
 (`to_tsvector('simple', title || ' ' || content)`) with a GIN index
@@ -437,11 +437,112 @@ Every agent's preamble gains `KNOWLEDGE_SEARCH_RULE`: the prompt holds only
 part of the project's knowledge, so look the rest up before guessing or
 reporting ignorance.
 
+### Knowledge injection
+
+`knowledgeSections` decides what the prompt carries. Factual docs
+(`kind = 'knowledge'`, project- or agent-scoped) become a **manifest**: one
+line per doc with title, scope, size and a ~110-character preview, plus an
+instruction to read or search rather than answer from the previews. On a
+realistic corpus this is roughly an 8× reduction in the knowledge section.
+
+Two things are still inlined in full:
+
+- **Voice profiles** (`kind = 'voice'`), always. They shape *how* an agent
+  writes, and an agent mid-draft has no reason to suspect it should go find
+  one. Facts are the opposite — an agent knows when it lacks one.
+- **Any knowledge base under `KNOWLEDGE_MANIFEST_MIN_CHARS` (2k)** in total.
+  The manifest costs ~600 characters of headers and previews and a lookup
+  costs an entire extra turn; neither pays for itself against two short docs.
+  This threshold is the first thing to tune if measurement says so.
+
+`KNOWLEDGE_INJECTION=full` restores the old inline-everything behavior — an
+escape hatch and, more usefully, the A/B baseline: run an agent under each
+setting and compare `task_runs.cost_usd`.
+
+The mode is read at call time, not at module load, because `dotenv` runs in
+`index.ts` whose body executes after `session.ts` has been evaluated.
+
+## Async fan-out and fan-in (migration 0008)
+
+`ask_agent` is synchronous, and the Agent SDK executes in-process MCP tool
+calls **one at a time** — verified against 0.3.228: three `tool_use` blocks in
+a single assistant message still ran strictly sequentially. So N `ask_agent`
+calls cost N waits in sequence, each bounded by `ASK_AGENT_TIMEOUT_MINUTES`,
+all inside the caller's single run and context window. That is fine for one
+question and useless for fanning a ticket out over its pull requests.
+
+`spawn_tasks` (`buildFleetServer`, task runs only) inserts one queued task per
+request — `source = 'fanout'`, `parent_task_id` = the caller's task, priority
+inherited — and returns immediately. The children run through the normal queue
+at the worker's full concurrency, each with its own fresh context. The caller
+is told to end its turn.
+
+**Fan-in** is what brings them back. Nothing re-invokes an agent on task
+completion (`notifyCompletion` only writes a chat message), so the **last child
+to finish** queues one aggregation task (`source = 'fanin'`) for the parent's
+agent, with every sibling's result embedded in the description (capped per
+child — the aggregating run is a fresh session that has never seen them).
+
+The rules, in `triggerFanIn` (`apps/worker/src/runner/executor.ts`), called
+from `finishTask` so `done`/`failed`/crashed all count:
+
+- **Only `'fanout'` children trigger.** `ask_agent` children (`'agent'`) must
+  not: their parent is still running and blocking on them, so aggregating would
+  re-run an agent that never asked for it. `'fanin'` tasks must not either — an
+  aggregation is itself a child of the same parent, so it would re-trigger on
+  its own completion and never converge. That exclusion is what terminates the
+  chain.
+- **`spawn_tasks` is refused** in `'agent'`, `'fanout'` and `'fanin'` runs,
+  preserving the one-hop delegation cap `ask_agent` already enforces.
+- **Races between workers** are settled exactly as 0006 settles sweeps: the
+  partial unique index `one_queued_fanin_per_parent` means the loser of a
+  simultaneous "am I the last sibling?" check gets `23505` and reads it as
+  "already queued". `tasks_parent_status_idx` serves the check itself.
+- **Fanned-out children do not post completion messages** — twenty of them
+  would bury the aggregation that actually answers the request. The board still
+  shows every child row, and the aggregation reports how many failed.
+
+Known gap: a fan-out whose last outstanding sibling is **cancelled** by the user
+never aggregates — cancellation does not run through the executor. The other
+results stay on their task rows; the parent is simply not re-run.
+
+## Agent sandboxing (migration 0009)
+
+Two capability gates, neither negotiable by prompt — which matters because
+agents run with `permissionMode: 'bypassPermissions'`, and much of what they
+read (ticket bodies, PR descriptions, diffs, issue comments) is written by
+people who are not the project owner.
+
+- **Scrubbed environment.** `buildAgentEnv` (`apps/worker/src/lib/agent-env.ts`)
+  is passed as the SDK's `env` at every `query()` call site. The SDK **replaces**
+  the subprocess environment with this value rather than merging, so it copies
+  the worker's environment and removes the secrets — dropping `PATH`/`HOME`
+  outright would break the subprocess and any `npx` stdio MCP server. Names
+  matching `TOKEN|SECRET|KEY|PASSWORD|PASSWD|CREDENTIAL|COOKIE` go, as does
+  anything `SUPABASE_*`; `ANTHROPIC_*` and `CLAUDE_*` stay because the
+  subprocess authenticates with them. A pattern rather than a fixed list, so a
+  credential added to `.env` later is excluded by default. Per-agent
+  credentials are unaffected — they live in `agents.mcp_servers` and reach
+  their server through `buildMcpServers`.
+- **Per-agent tool limits.** `agents.allowed_tools` maps to the SDK's `tools`
+  option (the base set of built-in tools) and `agents.disallowed_tools` to
+  `disallowedTools`. Deliberately *not* the SDK's `allowedTools` option, which
+  only auto-approves permission prompts — meaningless under
+  `bypassPermissions`. Empty arrays mean unrestricted and must be **omitted**
+  at the call site: `tools: []` disables every built-in tool, so "nothing
+  configured" and "allow nothing" would otherwise collide (`buildToolLimits`
+  handles this, and returns `{}` for pre-0009 rows, so the code is safe to
+  deploy before the migration). Fleet MCP tools are not built-ins and stay
+  available regardless.
+
 ## Environment
 
 See `.env.example`: Supabase URL/keys, `ANTHROPIC_API_KEY`,
 `TELEGRAM_BOT_TOKEN`, `GITHUB_TOKEN`, `WORKSPACES_ROOT`, `WEB_URL`,
-`KNOWLEDGE_SWEEP_AFTER_RUNS`.
+`KNOWLEDGE_SWEEP_AFTER_RUNS`, `KNOWLEDGE_INJECTION`,
+`WORKER_MAX_CONCURRENT_TASKS` (default 5 — each run spawns an SDK subprocess,
+so size it against memory and API rate limits, not CPU),
+`ASK_AGENT_TIMEOUT_MINUTES`.
 `SUPABASE_SERVICE_ROLE_KEY` is required by **both** the web server (API
 routes / server components) and the worker — it must never reach the
 browser.

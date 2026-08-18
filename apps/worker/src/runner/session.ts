@@ -20,17 +20,31 @@ import { logger, type RunLogWriter } from "../lib/logger.js";
 import type { Semaphore } from "../lib/semaphore.js";
 
 const ASK_AGENT_POLL_MS = 3_000;
-const ASK_AGENT_TIMEOUT_MS = 10 * 60_000;
+/**
+ * How long ask_agent blocks on its child before giving up. Override with
+ * ASK_AGENT_TIMEOUT_MINUTES. Raising it is a workaround, not a fix: ask_agent
+ * calls run one at a time within a session, so a fan-out of N questions costs
+ * N timeouts in sequence. Use spawn_tasks for fan-out.
+ */
+const ASK_AGENT_TIMEOUT_MS = parsePositiveInt(process.env.ASK_AGENT_TIMEOUT_MINUTES, 10) * 60_000;
+/** Ceiling on one spawn_tasks call, so a confused agent cannot flood the queue. */
+const MAX_SPAWNED_TASKS = 20;
+
+function parsePositiveInt(raw: string | undefined, fallback: number): number {
+  const parsed = Number(raw);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
 const ACTIVITY_MAX_ROWS = 100;
 const ACTIVITY_MESSAGE_MAX_CHARS = 500;
 const ACTIVITY_RESULT_MAX_CHARS = 800;
 const ACTIVITY_DEFAULT_LOOKBACK_MS = 72 * 60 * 60 * 1000;
 
 /**
- * Size ceiling for one knowledge doc. Docs are injected into EVERY agent's
- * system prompt on every task run and every chat turn, so unchecked growth is
- * paid for by the whole fleet on every future run. Hitting this ceiling is the
- * signal to consolidate — which is already part of the librarian's job.
+ * Size ceiling for one knowledge doc. Under manifest injection a doc is no
+ * longer charged to every run, but it is still read whole whenever an agent
+ * needs any part of it — so a sprawling doc makes every lookup expensive and
+ * buries the fact that was wanted. Hitting this ceiling is the signal to
+ * consolidate, which is already part of the librarian's job.
  */
 const KNOWLEDGE_DOC_MAX_CHARS = 12_000;
 
@@ -40,6 +54,15 @@ const SEARCH_DEFAULT_LIMIT = 8;
 const SEARCH_SNIPPET_CHARS = 300;
 /** read_knowledge: ceiling on one returned document (docs are capped well below this). */
 const KNOWLEDGE_READ_MAX_CHARS = 20_000;
+/** Manifest: characters of the one-line preview shown per document. */
+const KNOWLEDGE_PREVIEW_CHARS = 110;
+/**
+ * Below this much factual content in total, inline everything instead of
+ * listing it. The manifest costs ~600 characters of headers and previews, and
+ * a lookup costs a whole extra turn (the conversation is re-sent) — neither
+ * pays for itself against a knowledge base this small.
+ */
+const KNOWLEDGE_MANIFEST_MIN_CHARS = 2_000;
 
 /**
  * Preamble rule for every agent: the system prompt carries only part of the
@@ -99,13 +122,23 @@ export interface FleetSessionContext {
 /**
  * Builds the in-process 'fleet' MCP server for one agent session:
  * - propose_action — queue an approval-gated outbound Slack/Gmail action.
- * - ask_agent — delegate a question to another agent as a child task.
+ * - ask_agent — delegate a question to another agent as a child task, and
+ *   block until it answers.
+ * - spawn_tasks — fan work out to another agent WITHOUT blocking; the worker
+ *   re-runs this agent with the collected results once they all finish.
  * - notify_user — direct (non-gated) notification to the project owner.
  * - reply_to_user — chat sessions only (ctx.reply set).
  * - save_knowledge / read_project_activity — librarian agents only.
  */
 export function buildFleetServer(ctx: FleetSessionContext): SdkMcpServerConfig {
   const { supabase, agent, projectId } = ctx;
+
+  /**
+   * True while this session has handed its concurrency slot back for the
+   * duration of a wait. Session-scoped so two waiters can never release the
+   * same permit twice — see the comment at the release site in ask_agent.
+   */
+  let slotReleased = false;
 
   const proposeAction = tool(
     "propose_action",
@@ -220,7 +253,18 @@ export function buildFleetServer(ctx: FleetSessionContext): SdkMcpServerConfig {
       // bounded pool, two parents waiting on children would otherwise
       // deadlock. The slot is re-acquired before this tool returns. Chat
       // sessions hold no slot (ctx.slots is null).
-      ctx.slots?.release();
+      //
+      // `slotReleased` guards against releasing one permit twice. The SDK
+      // executes in-process MCP tool calls strictly one at a time (verified
+      // against 0.3.228: three tool_use blocks in a single assistant message
+      // still ran sequentially), so two waits cannot overlap today — but a
+      // future SDK that parallelizes them would otherwise inflate the pool
+      // permanently, and a leaked permit is silent.
+      const releasedHere = ctx.slots !== null && !slotReleased;
+      if (releasedHere) {
+        slotReleased = true;
+        ctx.slots!.release();
+      }
       let outcome: { status: TaskStatus; result: string | null } | null = null;
       try {
         const deadline = Date.now() + ASK_AGENT_TIMEOUT_MS;
@@ -253,7 +297,10 @@ export function buildFleetServer(ctx: FleetSessionContext): SdkMcpServerConfig {
           }
         }
       } finally {
-        if (ctx.slots) await ctx.slots.acquire();
+        if (releasedHere) {
+          await ctx.slots!.acquire();
+          slotReleased = false;
+        }
       }
 
       await ctx.runLog?.write("status", {
@@ -264,7 +311,7 @@ export function buildFleetServer(ctx: FleetSessionContext): SdkMcpServerConfig {
 
       if (!outcome) {
         return textResult(
-          `Error: agent "${target.name}" did not finish within 10 minutes. ` +
+          `Error: agent "${target.name}" did not finish within ${Math.round(ASK_AGENT_TIMEOUT_MS / 60_000)} minutes. ` +
             `Task ${childId} may still complete later; continue without its answer.`,
         );
       }
@@ -277,6 +324,89 @@ export function buildFleetServer(ctx: FleetSessionContext): SdkMcpServerConfig {
       }
       return textResult(
         `Error: the task for agent "${target.name}" ended with status '${outcome.status}': ${outcome.result ?? "no details"}`,
+      );
+    },
+  );
+
+  const spawnTasks = tool(
+    "spawn_tasks",
+    "Fan work out to another agent as independent background tasks. Unlike ask_agent this does NOT wait: " +
+      "each request becomes its own queued task with its own fresh context, and they run in parallel. " +
+      "When the last one finishes you are automatically re-run with all of their results collected, so " +
+      "after calling this you should FINISH YOUR TURN — do not poll, do not guess at their answers, and " +
+      "do not call spawn_tasks again in the same run. Use this whenever you have several similar units of " +
+      "work (one pull request each, one repository each); use ask_agent only for a single question whose " +
+      "answer you need before you can continue.",
+    {
+      agent_name: z.string().min(1).describe("Name of the agent to run these tasks (case-insensitive)"),
+      requests: z
+        .array(
+          z.object({
+            title: z.string().min(1).max(300).describe("Short task title, e.g. 'Review PR #412'"),
+            request: z
+              .string()
+              .min(1)
+              .describe("The full, self-contained instruction — the other agent sees nothing else"),
+          }),
+        )
+        .min(1)
+        .max(MAX_SPAWNED_TASKS)
+        .describe("One entry per unit of work"),
+    },
+    async (args) => {
+      if (!ctx.task) {
+        return textResult(
+          "Error: spawn_tasks is only available in task runs (a chat turn has no parent task to " +
+            "collect the results into). Use ask_agent instead.",
+        );
+      }
+      // Same one-hop rule as ask_agent, plus the aggregation task itself: a
+      // 'fanin' run spawning a fresh batch under the SAME parent would queue
+      // another aggregation and never converge.
+      if (ctx.task.source === "agent" || ctx.task.source === "fanout" || ctx.task.source === "fanin") {
+        return textResult(
+          "Error: spawn_tasks is not available in this task — it was itself created by another agent " +
+            "(maximum delegation depth is 1). Do this work yourself, or report what you have.",
+        );
+      }
+
+      const target = await findAgentByName(supabase, projectId, args.agent_name);
+      if (!target) {
+        return textResult(`Error: no active agent named "${args.agent_name}" found in this project.`);
+      }
+
+      const rows = args.requests.map((entry) => ({
+        project_id: projectId,
+        agent_id: target.id,
+        source: "fanout" as const,
+        parent_task_id: ctx.task!.id,
+        title: entry.title,
+        description: entry.request,
+        status: "queued" as const,
+        // Fanned-out work inherits the caller's urgency: it IS the caller's
+        // work, just executed elsewhere.
+        priority: ctx.task!.priority,
+      }));
+
+      const { data, error } = await supabase.from("tasks").insert(rows).select("id");
+      if (error) return textResult(`Error creating the tasks: ${error.message}`);
+      const ids = ((data ?? []) as Array<{ id: string }>).map((row) => row.id);
+
+      logger.info(
+        "fleet",
+        `agent ${agent.name}: spawn_tasks created ${ids.length} task(s) for agent ${target.name}`,
+      );
+      await ctx.runLog?.write("status", {
+        status: "tasks_spawned",
+        child_task_ids: ids,
+        target_agent_id: target.id,
+        target_agent_name: target.name,
+      });
+
+      return textResult(
+        `Queued ${ids.length} task(s) for ${target.name}: ${ids.join(", ")}.\n\n` +
+          `They are running in the background. Finish your turn now — when the last one completes you ` +
+          `will be started again with all of their results, and that is when you write the final answer.`,
       );
     },
   );
@@ -339,6 +469,9 @@ export function buildFleetServer(ctx: FleetSessionContext): SdkMcpServerConfig {
     tools: [
       proposeAction,
       askAgent,
+      // Task runs only: a chat turn has no parent task to aggregate into, and
+      // the tool refuses there anyway — no reason to advertise it.
+      ...(ctx.task ? [spawnTasks] : []),
       notifyUser,
       buildSearchKnowledgeTool(ctx),
       buildReadKnowledgeTool(ctx),
@@ -468,9 +601,9 @@ function buildSaveKnowledgeTool(ctx: FleetSessionContext) {
 function docTooLargeMessage(title: string, length: number): string {
   return (
     `Error: "${title}" would be ${length} characters, over the ${KNOWLEDGE_DOC_MAX_CHARS}-character ceiling ` +
-    `for one doc. Nothing was written. This doc sits in every agent's system prompt on every run, so it has ` +
-    `to stay tight: consolidate it instead — drop superseded facts, merge duplicates, retire stale entries — ` +
-    `and re-send the shorter revised doc with mode 'replace'.`
+    `for one doc. Nothing was written. An agent reads this doc whole whenever it needs any part of it, so ` +
+    `it has to stay tight: consolidate it instead — drop superseded facts, merge duplicates, retire stale ` +
+    `entries — and re-send the shorter revised doc with mode 'replace'.`
   );
 }
 
@@ -753,15 +886,25 @@ export async function loadKnowledgeBundle(
  * kind 'knowledge'), "# Voice profiles" (own docs of kind 'voice').
  */
 export function knowledgeSections(bundle: KnowledgeBundle): string {
+  const all = [...bundle.projectDocs, ...bundle.agentDocs];
+  const voiceDocs = all.filter((doc) => doc.kind === "voice");
+  const factualDocs = all.filter((doc) => doc.kind !== "voice");
   const parts: string[] = [];
-  if (bundle.projectDocs.length > 0) {
-    parts.push(`# Project knowledge\n${bundle.projectDocs.map(formatKnowledgeDoc).join("\n\n")}`);
+
+  if (factualDocs.length > 0) {
+    const totalChars = factualDocs.reduce((sum, doc) => sum + doc.content.length, 0);
+    const inline =
+      knowledgeInjectionMode() === "full" || totalChars < KNOWLEDGE_MANIFEST_MIN_CHARS;
+    parts.push(
+      inline
+        ? `# Project knowledge\n${factualDocs.map(formatKnowledgeDoc).join("\n\n")}`
+        : knowledgeManifest(factualDocs),
+    );
   }
-  const knowledgeDocs = bundle.agentDocs.filter((doc) => doc.kind === "knowledge");
-  const voiceDocs = bundle.agentDocs.filter((doc) => doc.kind === "voice");
-  if (knowledgeDocs.length > 0) {
-    parts.push(`# Knowledge\n${knowledgeDocs.map(formatKnowledgeDoc).join("\n\n")}`);
-  }
+
+  // Voice profiles stay inlined in both modes: they shape *how* the agent
+  // writes, and an agent mid-draft has no reason to suspect it should go
+  // looking for one. Facts are different — those it knows it lacks.
   if (voiceDocs.length > 0) {
     parts.push(
       `# Voice profiles\n` +
@@ -771,6 +914,54 @@ export function knowledgeSections(bundle: KnowledgeBundle): string {
     );
   }
   return parts.join("\n\n");
+}
+
+/**
+ * How factual docs reach the prompt. 'manifest' (default) lists them and lets
+ * the agent fetch what it needs; 'full' inlines every document, the behavior
+ * before 0007 — kept as an escape hatch and an A/B baseline (compare
+ * task_runs.cost_usd between the two).
+ *
+ * Read at call time, not at module load: dotenv runs in index.ts, whose body
+ * executes after this module has already been evaluated.
+ */
+function knowledgeInjectionMode(): "manifest" | "full" {
+  return (process.env.KNOWLEDGE_INJECTION ?? "").trim().toLowerCase() === "full" ? "full" : "manifest";
+}
+
+/**
+ * Titles, sizes and one-line previews instead of content — the whole point of
+ * the manifest is that the fleet stops paying for every document on every run.
+ * Previews exist so the agent can tell which document is worth a read; they
+ * are explicitly not an answer.
+ */
+function knowledgeManifest(docs: AgentKnowledgeRow[]): string {
+  const lines = docs.map((doc) => {
+    const scope = doc.project_id ? "project" : "yours";
+    return `- "${doc.title}" (${scope}, ${formatDocSize(doc.content.length)}) — ${previewLine(doc.content)}`;
+  });
+  return [
+    `# Project knowledge — ${docs.length} document${docs.length === 1 ? "" : "s"}, listed but not included`,
+    `Read one in full with read_knowledge("<title>"), or search across all of them with ` +
+      `search_knowledge. The previews below are one line each and are never enough to answer from — ` +
+      `read the document.`,
+    ...lines,
+  ].join("\n");
+}
+
+function formatDocSize(chars: number): string {
+  return chars >= 1000 ? `${(chars / 1000).toFixed(1)}k chars` : `${chars} chars`;
+}
+
+/** First line of real content — skipping markdown headings, which just repeat the title. */
+function previewLine(content: string): string {
+  const lines = content
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+  const body = lines.filter((line) => !/^#{1,6}\s/.test(line));
+  const first = (body[0] ?? lines[0] ?? "(empty)").replace(/^[-*]\s+/, "");
+  return truncate(first.replace(/\s+/g, " "), KNOWLEDGE_PREVIEW_CHARS);
 }
 
 function formatKnowledgeDoc(doc: AgentKnowledgeRow): string {

@@ -72,6 +72,8 @@ export const POST = apiHandler(async (request: Request, { params }: Params) => {
       model: input.model,
       plugins: input.plugins,
       mcp_servers: input.mcpServers,
+      allowed_tools: input.allowedTools,
+      disallowed_tools: input.disallowedTools,
     })
     .select()
     .single();

@@ -5,7 +5,18 @@ import type { Semaphore } from "../lib/semaphore.js";
 
 const POLL_INTERVAL_MS = 3_000;
 const AGENTS_REFRESH_MS = 30_000;
-export const MAX_CONCURRENT_TASKS = 2;
+/**
+ * Task runs executed at once by THIS worker. Each run spawns an Agent SDK
+ * subprocess, so the ceiling is memory and API rate limits, not CPU. Override
+ * with WORKER_MAX_CONCURRENT_TASKS; a missing or unparseable value falls back
+ * to the default.
+ */
+export const MAX_CONCURRENT_TASKS = parsePositiveInt(process.env.WORKER_MAX_CONCURRENT_TASKS, 5);
+
+function parsePositiveInt(raw: string | undefined, fallback: number): number {
+  const parsed = Number(raw);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
 
 /**
  * Claims queued tasks via the claim_next_task RPC and hands them to the

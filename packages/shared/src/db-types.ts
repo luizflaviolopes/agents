@@ -19,7 +19,11 @@ export type TaskSource =
   | "schedule"
   | "agent"
   /** Knowledge sweep enqueued by the worker's post-run trigger (0006). */
-  | "trigger";
+  | "trigger"
+  /** Child task created by an agent's spawn_tasks tool — async, unlike 'agent' (0008). */
+  | "fanout"
+  /** Aggregation task enqueued once the last 'fanout' sibling finished (0008). */
+  | "fanin";
 
 export type TaskStatus =
   | "queued"
@@ -161,6 +165,15 @@ export interface Agent {
   plugins: string[];
   /** jsonb array of MCP server configs. */
   mcp_servers: McpServerConfig[];
+  /**
+   * Built-in tool allow-list (0009) — the SDK's `tools` option. Empty = no
+   * allow-list at all, i.e. every built-in stays available unless disallowed.
+   * A capability gate, not an instruction; see
+   * supabase/migrations/0009_agent_tool_limits.sql.
+   */
+  allowed_tools: string[];
+  /** Built-in tool deny-list (0009) — the SDK's `disallowedTools` option. */
+  disallowed_tools: string[];
   is_active: boolean;
   /**
    * High-water mark for the librarian's read_project_activity sweeps (0005);

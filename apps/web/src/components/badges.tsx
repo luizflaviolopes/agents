@@ -35,6 +35,8 @@ const SOURCE_META: Record<
   schedule: { label: "schedule", variant: "warning" },
   agent: { label: "agent", variant: "secondary" },
   trigger: { label: "trigger", variant: "muted" },
+  fanout: { label: "fan-out", variant: "secondary" },
+  fanin: { label: "fan-in", variant: "info" },
 };
 
 export function SourceBadge({ source }: { source: TaskSource }) {

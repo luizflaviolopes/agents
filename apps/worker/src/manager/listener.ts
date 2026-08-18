@@ -16,6 +16,7 @@ import {
   type Project,
   type Task,
 } from "@agent-fleet/shared";
+import { buildAgentEnv, buildToolLimits } from "../lib/agent-env.js";
 import { logger } from "../lib/logger.js";
 import type { WorkspaceManager } from "../workspaces/manager.js";
 import {
@@ -206,6 +207,9 @@ export class ManagerListener {
       settingSources: [],
       persistSession: false,
       maxTurns: MANAGER_MAX_TURNS,
+      // No built-in tools here, but the subprocess environment is still the
+      // worker's — scrub it like every other agent session.
+      env: buildAgentEnv(),
     };
 
     try {
@@ -310,6 +314,11 @@ export class ManagerListener {
         settingSources: [],
         persistSession: false,
         maxTurns: CHAT_MAX_TURNS,
+        // Same guardrails as a task run — a chat session is the same agent
+        // with the same tools, so it gets the same scrubbed environment and
+        // the same built-in tool limits (0009).
+        env: buildAgentEnv(),
+        ...buildToolLimits(agent),
         stderr: (data: string) => {
           const line = data.trim();
           if (line) logger.debug("agent-sdk", `[chat ${agent.name}] ${line.slice(0, 500)}`);

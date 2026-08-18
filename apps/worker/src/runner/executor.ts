@@ -14,6 +14,7 @@ import {
   type TaskRun,
   type TaskStatus,
 } from "@agent-fleet/shared";
+import { buildAgentEnv, buildToolLimits } from "../lib/agent-env.js";
 import { logger, RunLogWriter } from "../lib/logger.js";
 import type { Semaphore } from "../lib/semaphore.js";
 import type { WorkspaceManager } from "../workspaces/manager.js";
@@ -45,6 +46,9 @@ const SWEEP_TASK_DESCRIPTION =
   "ignored, per your instructions.";
 /** Sweeps yield to real work — claim_next_task orders by priority desc. */
 const SWEEP_PRIORITY = -10;
+
+/** Per-child result budget in the aggregation task's description (0008). */
+const FANIN_RESULT_MAX_CHARS = 4_000;
 
 /**
  * Usage totals extracted from the SDK result message, written to the
@@ -159,6 +163,11 @@ export class TaskExecutor {
         settingSources: [],
         persistSession: false,
         maxTurns: MAX_TURNS,
+        // The worker's secrets stay out of the agent's shell, and the agent's
+        // built-in tools are capped by its own config (0009) — neither is
+        // negotiable by prompt, which matters under bypassPermissions.
+        env: buildAgentEnv(),
+        ...buildToolLimits(agent),
         stderr: (data: string) => {
           const line = data.trim();
           if (line) logger.debug("agent-sdk", `[task ${task.id}] ${line.slice(0, 500)}`);
@@ -538,6 +547,93 @@ export class TaskExecutor {
 
     logger.info("executor", `task ${task.id} ${finalStatus}`);
     await this.notifyCompletion(task, agent, finalStatus, resultText);
+    await this.triggerFanIn(task);
+  }
+
+  /**
+   * Brings a spawn_tasks fan-out back together (0008).
+   *
+   * The agent that called spawn_tasks finished its run without its children's
+   * results — that is the point, it did not block. So the LAST child to finish
+   * is responsible for queueing one aggregation task ('fanin') back to the
+   * parent's agent, carrying every sibling's result. Without this the fanned-out
+   * work would complete and no one would ever read it: nothing re-invokes an
+   * agent on task completion (notifyCompletion only writes a chat message).
+   *
+   * Only 'fanout' children trigger. ask_agent children ('agent') must not: their
+   * parent is still running and blocking on them, so aggregating would re-run an
+   * agent that never asked for it. 'fanin' tasks must not either — an aggregation
+   * is itself a child of the same parent, so it would re-trigger on its own
+   * completion and never converge.
+   *
+   * Known gap: a fan-out whose last outstanding sibling is CANCELLED by the user
+   * never aggregates (cancellation does not run through the executor). The other
+   * siblings' results stay on their task rows; the parent simply is not re-run.
+   */
+  private async triggerFanIn(task: Task): Promise<void> {
+    if (task.source !== "fanout" || !task.parent_task_id) return;
+    const parentId = task.parent_task_id;
+
+    const { data: unfinished, error } = await this.supabase
+      .from("tasks")
+      .select("id")
+      .eq("parent_task_id", parentId)
+      .eq("source", "fanout")
+      .in("status", ["queued", "in_progress"])
+      .limit(1);
+    if (error) {
+      logger.error("executor", `fan-in check for parent ${parentId} failed: ${error.message}`);
+      return;
+    }
+    if ((unfinished ?? []).length > 0) return; // not the last sibling
+
+    const { data: parentRow, error: parentError } = await this.supabase
+      .from("tasks")
+      .select("*")
+      .eq("id", parentId)
+      .maybeSingle();
+    if (parentError) {
+      logger.error("executor", `fan-in could not load parent ${parentId}: ${parentError.message}`);
+      return;
+    }
+    const parent = parentRow as Task | null;
+    if (!parent || !parent.agent_id) {
+      logger.warn("executor", `fan-in skipped: parent ${parentId} is gone or has no agent`);
+      return;
+    }
+
+    const { data: childRows, error: childError } = await this.supabase
+      .from("tasks")
+      .select("title, status, result")
+      .eq("parent_task_id", parentId)
+      .eq("source", "fanout")
+      .order("created_at", { ascending: true });
+    if (childError) {
+      logger.error("executor", `fan-in could not load children of ${parentId}: ${childError.message}`);
+      return;
+    }
+    const children = (childRows ?? []) as Array<Pick<Task, "title" | "status" | "result">>;
+
+    const { error: insertError } = await this.supabase.from("tasks").insert({
+      project_id: parent.project_id,
+      agent_id: parent.agent_id,
+      source: "fanin",
+      parent_task_id: parent.id,
+      title: `Collected results: ${parent.title}`.slice(0, 300),
+      description: buildFanInDescription(parent, children),
+      priority: parent.priority,
+    });
+    if (insertError) {
+      // Two workers finishing the last two siblings at once both counted zero
+      // unfinished; one_queued_fanin_per_parent (0008) settles it.
+      if (insertError.code === "23505") {
+        logger.debug("executor", `fan-in already queued for parent ${parentId} (lost the insert race)`);
+        return;
+      }
+      logger.error("executor", `failed to queue fan-in for parent ${parentId}: ${insertError.message}`);
+      return;
+    }
+    logger.info("executor", `fan-in queued for parent ${parentId} (${children.length} results)`);
   }
 
   /**
@@ -550,6 +646,12 @@ export class TaskExecutor {
     finalStatus: Extract<TaskStatus, "done" | "failed" | "review">,
     resultText: string,
   ): Promise<void> {
+    // A fanned-out child is one slice of somebody else's task, and there can be
+    // twenty of them. Announcing each one would bury the aggregation message
+    // that actually answers the request — that message reports the failures
+    // too, and the board still shows every child row.
+    if (task.source === "fanout") return;
+
     const managerDriven = task.source === "manager" || task.parent_task_id !== null;
     if (!managerDriven) return;
 
@@ -583,6 +685,47 @@ export class TaskExecutor {
       }
     }
   }
+}
+
+/**
+ * The aggregation task's description: the original request, then every
+ * fanned-out result (0008).
+ *
+ * Results are embedded rather than fetched by the agent, because a task
+ * description has to be self-contained — the aggregating run is a fresh
+ * session that has never seen the children. Each result is capped so one
+ * verbose child cannot crowd out the rest.
+ */
+function buildFanInDescription(
+  parent: Task,
+  children: Array<Pick<Task, "title" | "status" | "result">>,
+): string {
+  const failed = children.filter((child) => child.status === "failed" || child.status === "cancelled").length;
+  const header =
+    `You fanned this work out to ${children.length} background task(s) and they have all finished. ` +
+    `Their results are below — this is the run where you write the final answer.\n\n` +
+    `Original task: ${parent.title}` +
+    (parent.description.trim() ? `\n${parent.description.trim()}` : "");
+
+  const results = children
+    .map((child, index) => {
+      const body = child.result?.trim() || "(no result text)";
+      return (
+        `--- ${index + 1}/${children.length}: ${child.title} [${child.status}] ---\n` +
+        truncate(body, FANIN_RESULT_MAX_CHARS)
+      );
+    })
+    .join("\n\n");
+
+  const footer =
+    `Consolidate the above into one answer for the original task: what was found, what matters most, ` +
+    `and what you recommend. Do not re-do their work and do not spawn more tasks. ` +
+    (failed > 0
+      ? `${failed} of them did not succeed — say so plainly rather than pretending their part is covered. `
+      : "") +
+    `Send the summary to the owner with notify_user, then repeat it as your task result.`;
+
+  return `${header}\n\n${results}\n\n${footer}`;
 }
 
 /**

@@ -53,6 +53,9 @@ export const createAgentSchema = z.object({
   model: z.string().min(1).default(DEFAULT_MODEL),
   plugins: z.array(z.string()).default([]),
   mcpServers: z.array(mcpServerSchema).default([]),
+  /** Built-in SDK tool limits (0009); empty arrays = unrestricted. */
+  allowedTools: z.array(z.string()).default([]),
+  disallowedTools: z.array(z.string()).default([]),
 });
 export type CreateAgentInput = z.infer<typeof createAgentSchema>;
 

@@ -342,6 +342,9 @@ function CreateAgentDialog({
         workspaceId: "",
         plugins: p.plugins ?? [],
         mcpServers: (p.mcpServers ?? []).map(mcpConfigToRow),
+        // The builder does not propose tool limits — set them deliberately.
+        allowedTools: [],
+        disallowedTools: [],
       });
       setBuilderNote(p.reasoning ?? null);
       setNeedsWorkspace(Boolean(p.needsWorkspace));
@@ -374,6 +377,8 @@ function CreateAgentDialog({
             instructions: form.instructions,
             model: form.model,
             plugins: form.plugins,
+            allowedTools: form.allowedTools,
+            disallowedTools: form.disallowedTools,
             mcpServers: form.mcpServers
               .filter((row) => row.name.trim())
               .map(rowToMcpConfig),
@@ -578,6 +583,8 @@ function EditAgentDialog({
             model: form.model,
             workspaceId: form.workspaceId || null,
             plugins: form.plugins,
+            allowedTools: form.allowedTools,
+            disallowedTools: form.disallowedTools,
             mcpServers: form.mcpServers
               .filter((row) => row.name.trim())
               .map(rowToMcpConfig),

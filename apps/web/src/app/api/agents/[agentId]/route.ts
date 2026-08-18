@@ -24,6 +24,8 @@ const updateAgentSchema = z.object({
   workspaceId: z.string().uuid().nullable().optional(),
   plugins: z.array(z.string()).optional(),
   mcpServers: z.array(mcpServerSchema).optional(),
+  allowedTools: z.array(z.string()).optional(),
+  disallowedTools: z.array(z.string()).optional(),
   isActive: z.boolean().optional(),
 });
 
@@ -61,6 +63,8 @@ export const PATCH = apiHandler(async (request: Request, { params }: Params) => 
   if (input.workspaceId !== undefined) patch.workspace_id = input.workspaceId;
   if (input.plugins !== undefined) patch.plugins = input.plugins;
   if (input.mcpServers !== undefined) patch.mcp_servers = input.mcpServers;
+  if (input.allowedTools !== undefined) patch.allowed_tools = input.allowedTools;
+  if (input.disallowedTools !== undefined) patch.disallowed_tools = input.disallowedTools;
   if (input.isActive !== undefined) patch.is_active = input.isActive;
   if (Object.keys(patch).length === 0) return jsonError(400, "Nothing to update");
 
