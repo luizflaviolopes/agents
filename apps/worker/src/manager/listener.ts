@@ -145,7 +145,14 @@ export class ManagerListener {
     }
   }
 
-  /** Serializes message handling so manager sessions don't interleave. */
+  /**
+   * Serializes message handling so manager sessions don't interleave.
+   *
+   * processedIds collapses the two delivery paths (Realtime INSERT and the
+   * poll) within THIS process. It is a cheap first filter, not the guarantee —
+   * it knows nothing about other workers. claimMessage is what actually
+   * decides who handles a message; see 0011.
+   */
   private enqueue(message: Message): void {
     if (!message?.id || this.processedIds.has(message.id)) return;
     this.processedIds.add(message.id);
@@ -166,6 +173,7 @@ export class ManagerListener {
 
   private async handleUserMessage(message: Message): Promise<void> {
     if (this.stopped) return;
+    if (!(await this.claimMessage(message))) return;
     logger.info("manager", `user message ${message.id} on project ${message.project_id} (${message.channel}, thread: ${message.agent_id ?? "manager"}): ${message.content.slice(0, 120)}`);
 
     // Direct thread with a specific agent (messages.agent_id set) — the
@@ -541,6 +549,47 @@ export class ManagerListener {
       version: "1.0.0",
       tools: [createTask, listAgents, listOpenTasks, reply],
     });
+  }
+
+  /**
+   * Wins or loses the right to handle this message, across every worker.
+   *
+   * The UPDATE only matches while handled_at is still null, so of two workers
+   * racing the same row exactly one comes back with a row: the second blocks on
+   * the first's lock, re-checks its WHERE clause once that commits, and matches
+   * nothing. Zero rows means another worker owns this message — drop it here,
+   * silently, because that worker is already answering the user.
+   *
+   * A failed UPDATE is treated as "not ours" too. That fails closed: a message
+   * can go unanswered, which the user sees and can retry, rather than being
+   * handled twice, which they cannot undo — and duplicate handling is the whole
+   * reason this claim exists. It is not a lost retry either way, since the poll
+   * only looks forward from lastSeenCreatedAt and enqueue has already recorded
+   * the id.
+   */
+  private async claimMessage(message: Message): Promise<boolean> {
+    try {
+      const { data, error } = await this.supabase
+        .from("messages")
+        .update({ handled_at: new Date().toISOString() })
+        .eq("id", message.id)
+        .eq("sender", "user")
+        .is("handled_at", null)
+        .select("id")
+        .maybeSingle();
+      if (error) {
+        logger.error("manager", `failed to claim message ${message.id} — not handling it: ${error.message}`);
+        return false;
+      }
+      if (!data) {
+        logger.info("manager", `message ${message.id} already claimed by another worker — skipping`);
+        return false;
+      }
+      return true;
+    } catch (err) {
+      logger.error("manager", `failed to claim message ${message.id} — not handling it`, err);
+      return false;
+    }
   }
 
   /** Stores the manager reply and mirrors it to Telegram when appropriate. */

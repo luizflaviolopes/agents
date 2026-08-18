@@ -378,4 +378,11 @@ export interface Message {
   channel: MessageChannel;
   content: string;
   created_at: string;
+  /**
+   * When a worker claimed this message for handling (0011). Set only on user
+   * messages, and only by the manager listener's claim — the winner of the
+   * claim is the one worker that runs a session for it. Null on every
+   * manager/agent reply, where it carries no meaning.
+   */
+  handled_at: string | null;
 }
