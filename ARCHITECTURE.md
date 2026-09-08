@@ -437,8 +437,8 @@ when the librarian's schedule next fired. The worker now enqueues a sweep as
 soon as a run finishes — **coalesced**, so a busy fleet produces one sweep per
 burst rather than one per run, and **serialized**, so two sweeps never edit the
 same docs at once (`save_knowledge` is a read-then-write with no version check:
-overlapping sweeps would silently clobber each other, and the cursor —
-advanced to the run's *start* time — can move backwards).
+overlapping sweeps would silently clobber each other, and the cursor can move
+backwards).
 
 `tasks.source` gains `'trigger'` (a sweep the worker queued). Sweep tasks are
 assigned to the project's librarian at `priority = -10`, so they always yield
@@ -454,12 +454,28 @@ The rules, all in `apps/worker/src/runner/executor.ts`:
   librarian task for the project is already `queued` (that task has not read
   its activity window yet, so it will cover this run too) or `in_progress`
   (starting a second sweep alongside it is the race described above).
+- **The cursor only moves as far as a run actually read.**
+  `read_project_activity` records its high-water mark on the run's
+  `RunState.activityReadThrough` (`session.ts`), and `advanceActivityCursor`
+  writes *that* — nothing else. A librarian run that never called the tool
+  never moves `agents.activity_cursor`. This matters because not every
+  librarian task is a sweep: an `ask_agent` forwarded fact (`source = 'agent'`)
+  arrives as a librarian task whose prompt is just the fact, and advancing the
+  cursor for it would make the next real sweep skip that whole window
+  permanently. A scheduled sweep that fails to call the tool is treated the
+  same way. Two further limits on the mark: it is stamped *before* the queries
+  run (they have no upper bound, so rows written mid-query may or may not be
+  in the result), and it is pulled back to the last returned row when a query
+  hits the `ACTIVITY_MAX_ROWS` cap, since the rest of that window was dropped.
 - **A successful librarian run** calls `chainSweepIfUnswept` instead: the
-  cursor now sits at that run's start time, so any task that finished *during*
-  the sweep is unswept, and the triggers that fired meanwhile deliberately
+  cursor now sits at the point that run read through, so any task that finished
+  after it is unswept, and the triggers that fired meanwhile deliberately
   queued nothing. The finishing run is therefore responsible for queueing the
-  follow-up. The query excludes the librarian's own tasks, so a sweep can never
-  re-trigger itself — the chain terminates as soon as activity stops.
+  follow-up. A librarian run that was *not* a sweep chains off the untouched
+  cursor — it still occupied the librarian and suppressed triggers, so it owes
+  a follow-up just the same. The query excludes the librarian's own tasks, so a
+  sweep can never re-trigger itself — the chain terminates as soon as activity
+  stops.
 - **Races between workers** are settled by the partial unique index
   `one_queued_sweep_per_project` — at most one queued `'trigger'` task per
   project. The pre-insert check is not atomic; the loser gets `23505` and reads
@@ -478,7 +494,8 @@ for fleet-wide, forever.
 
 Not covered: `ask_agent` forwarded-fact tasks (`source = 'agent'`) still insert
 directly, so one can overlap a sweep. That predates 0006; the trigger path
-never adds to it.
+never adds to it. (They no longer corrupt the cursor, though — see the
+read-through rule above.)
 
 ## Knowledge search (migration 0007)
 

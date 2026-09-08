@@ -300,7 +300,7 @@ export class ManagerListener {
           runId: null,
           runLog: null,
           slots: null,
-          runState: { pendingActionsCreated: 0 },
+          runState: { pendingActionsCreated: 0, activityReadThrough: null },
           telegramNotifier: this.telegramNotifier,
           pendingActionNotifier: this.pendingActionNotifier,
           reply: { channel: message.channel, send: sendReply },

@@ -31,6 +31,7 @@ import {
   truncate,
   type KnowledgeBundle,
   type PendingActionNotifier,
+  type RunState,
   type TelegramNotifier,
 } from "./session.js";
 
@@ -120,8 +121,10 @@ export class TaskExecutor {
     }
     const runLog = new RunLogWriter(this.supabase, run.id);
 
-    // Per-run counter: >=1 proposed pending action ⇒ final status 'review'.
-    const runState = { pendingActionsCreated: 0 };
+    // Per-run state the fleet tools write: >=1 proposed pending action ⇒ final
+    // status 'review'; activityReadThrough is set by read_project_activity and
+    // is what makes this run count as a sweep.
+    const runState: RunState = { pendingActionsCreated: 0, activityReadThrough: null };
 
     try {
       // 2. Resolve the working directory.
@@ -208,12 +211,25 @@ export class TaskExecutor {
         await this.markRun(run.id, "succeeded", null, usage);
         const finalStatus: TaskStatus = runState.pendingActionsCreated > 0 ? "review" : "done";
         await this.finishTask(task, agent, finalStatus, resultText ?? "");
-        // A successful librarian TASK run advances the activity cursor to the
-        // run's start time (its read_project_activity high-water mark). Chat
-        // sessions never advance it.
+        // A successful librarian TASK run advances the activity cursor — but
+        // only as far as this run actually read project activity, and only if
+        // it read any at all. Librarian runs that are not sweeps (an ask_agent
+        // forwarded fact, source 'agent') never call read_project_activity;
+        // advancing for those would skip their whole window forever. Chat
+        // sessions never advance the cursor.
         if (agent.role === "librarian") {
-          await this.advanceActivityCursor(agent, run.started_at);
-          await this.chainSweepIfUnswept(task, agent, run.started_at);
+          const sweptThrough = runState.activityReadThrough;
+          if (sweptThrough) {
+            await this.advanceActivityCursor(agent, sweptThrough);
+          } else {
+            logger.debug(
+              "executor",
+              `librarian ${agent.name}: run did not call read_project_activity — activity_cursor unchanged`,
+            );
+          }
+          // Unswept work is anything past the cursor's real position: the point
+          // this run swept to, or the untouched cursor when it did not sweep.
+          await this.chainSweepIfUnswept(task, agent, sweptThrough ?? agent.activity_cursor ?? run.started_at);
         } else {
           await this.triggerKnowledgeSweep(task, agent);
         }
@@ -409,18 +425,18 @@ export class TaskExecutor {
     }
   }
 
-  /** Librarian high-water mark: activity_cursor = the successful run's start time. */
-  private async advanceActivityCursor(agent: Agent, runStartedAt: string): Promise<void> {
+  /** Librarian high-water mark: activity_cursor = how far the run swept. */
+  private async advanceActivityCursor(agent: Agent, sweptThrough: string): Promise<void> {
     try {
       const { error } = await this.supabase
         .from("agents")
-        .update({ activity_cursor: runStartedAt })
+        .update({ activity_cursor: sweptThrough })
         .eq("id", agent.id);
       if (error) {
         logger.error("executor", `failed to advance activity_cursor for librarian ${agent.id}: ${error.message}`);
         return;
       }
-      logger.info("executor", `librarian ${agent.name}: activity_cursor advanced to ${runStartedAt}`);
+      logger.info("executor", `librarian ${agent.name}: activity_cursor advanced to ${sweptThrough}`);
     } catch (err) {
       logger.error("executor", `failed to advance activity_cursor for librarian ${agent.id}`, err);
     }
@@ -451,15 +467,20 @@ export class TaskExecutor {
 
   /**
    * Follow-up sweep after a librarian run. Two facts make this the right place
-   * for it: the cursor now sits at this run's start time, so anything that
-   * finished *during* the run is unswept; and triggers that fired while it ran
-   * deliberately did not enqueue (that is what keeps sweeps from overlapping
-   * and racing on the same docs). So the run that just finished is responsible
-   * for queueing the next one when it left work behind.
+   * for it: the cursor now sits at the point this run swept to, so anything
+   * that finished after it is unswept; and triggers that fired while the run
+   * ran deliberately did not enqueue (that is what keeps sweeps from
+   * overlapping and racing on the same docs). So the run that just finished is
+   * responsible for queueing the next one when it left work behind.
+   *
+   * `sweptThrough` is the cursor's real position: how far this run read, or
+   * the untouched cursor when the run was not a sweep at all (an ask_agent
+   * forwarded fact) — those still occupied the librarian and suppressed
+   * triggers, so they owe a follow-up just the same.
    *
    * Excludes the librarian's own tasks, so a sweep can never re-trigger itself.
    */
-  private async chainSweepIfUnswept(task: Task, librarian: Agent, runStartedAt: string): Promise<void> {
+  private async chainSweepIfUnswept(task: Task, librarian: Agent, sweptThrough: string): Promise<void> {
     if (!this.sweepAfterRuns) return;
     try {
       const { data, error } = await this.supabase
@@ -468,7 +489,7 @@ export class TaskExecutor {
         .eq("project_id", task.project_id)
         .in("status", ["done", "review"])
         .neq("agent_id", librarian.id)
-        .gt("finished_at", runStartedAt)
+        .gt("finished_at", sweptThrough)
         .limit(1);
       if (error) {
         logger.error(

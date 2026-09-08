@@ -86,6 +86,20 @@ export type PendingActionNotifier = (
   agentName: string,
 ) => Promise<void>;
 
+/** Mutable state the fleet tools accumulate over one agent session. */
+export interface RunState {
+  /** Incremented per proposed pending action (task runs use it for 'review'). */
+  pendingActionsCreated: number;
+  /**
+   * How far read_project_activity has read this session, or null when the tool
+   * was never called (or was only called over a window that would leave a gap
+   * after the stored cursor). A librarian task run advances
+   * agents.activity_cursor to this and to nothing else, so a run that never
+   * swept never moves it.
+   */
+  activityReadThrough: string | null;
+}
+
 /**
  * Everything the in-process 'fleet' MCP server needs to serve one agent
  * session. Task runs and direct chat sessions both build one of these —
@@ -110,8 +124,8 @@ export interface FleetSessionContext {
    * chat sessions (they hold no slot).
    */
   slots: Semaphore | null;
-  /** Incremented per proposed pending action (task runs use it for 'review'). */
-  runState: { pendingActionsCreated: number };
+  /** Mutable state the fleet tools accumulate over this session. */
+  runState: RunState;
   telegramNotifier?: TelegramNotifier;
   pendingActionNotifier?: PendingActionNotifier;
   /** Present in chat sessions: adds reply_to_user targeting this channel. */
@@ -740,6 +754,10 @@ function buildReadProjectActivityTool(ctx: FleetSessionContext) {
       if (!since) {
         since = new Date(Date.now() - ACTIVITY_DEFAULT_LOOKBACK_MS).toISOString();
       }
+      // Stamped before the queries, not after: the queries have no upper
+      // bound, so rows written while they run may or may not be in the result.
+      // Reading up to this point is the part that is guaranteed covered.
+      const readAt = new Date().toISOString();
 
       const agents = await listActiveAgents(supabase, projectId);
       const agentNames = new Map(agents.map((a) => [a.id, a.name]));
@@ -790,9 +808,38 @@ function buildReadProjectActivityTool(ctx: FleetSessionContext) {
         };
       });
 
+      // A result capped at ACTIVITY_MAX_ROWS covers only as far as its last
+      // row — both queries take the *oldest* matches, so anything past that in
+      // the window was dropped and the cursor must not move over it. The
+      // shortfall is picked up by the next sweep (chainSweepIfUnswept sees the
+      // still-unswept tasks) rather than being skipped for good.
+      const readThrough = [
+        messages.length >= ACTIVITY_MAX_ROWS ? messages[messages.length - 1].at : null,
+        tasks.length >= ACTIVITY_MAX_ROWS ? tasks[tasks.length - 1].at : null,
+      ].reduce<string>((earliest, cap) => (cap && Date.parse(cap) < Date.parse(earliest) ? cap : earliest), readAt);
+
+      recordActivityRead(ctx, since, readThrough);
       return textResult(JSON.stringify({ since, messages, tasks }));
     },
   );
+}
+
+/**
+ * Records that this session has read project activity over (since, readAt],
+ * which is what lets a librarian task run advance its activity cursor.
+ *
+ * The cursor may only move over a window that is actually continuous with the
+ * one already covered, so a read starting *after* the covered point is
+ * recorded as nothing: it leaves everything in between unread, and advancing
+ * past that gap would skip it forever.
+ */
+function recordActivityRead(ctx: FleetSessionContext, since: string, readAt: string): void {
+  const covered = ctx.runState.activityReadThrough ?? ctx.agent.activity_cursor;
+  if (covered && Date.parse(since) > Date.parse(covered)) return;
+  const current = ctx.runState.activityReadThrough;
+  if (current === null || Date.parse(readAt) > Date.parse(current)) {
+    ctx.runState.activityReadThrough = readAt;
+  }
 }
 
 // ----------------------------------------------------- knowledge search (all)
