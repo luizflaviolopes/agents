@@ -108,3 +108,9 @@ export const MCP_APPROVAL_POLICIES = [
   "ask",
 ] as const satisfies readonly McpApprovalPolicy[];
 
+/**
+ * Prefix on every personal access token (0012). Purely cosmetic to us — the
+ * lookup is by hash — but it makes a leaked token identifiable at a glance,
+ * which is what secret scanners key off.
+ */
+export const API_TOKEN_PREFIX = "aft_";

@@ -22,12 +22,26 @@ export function jsonError(status: number, message: string): NextResponse {
 }
 
 /**
- * Thrown by the require* helpers below; `apiHandler` converts it back into
- * the wrapped response. Never leaves the route-handler layer.
+ * Thrown by the require* helpers below; `apiHandler` turns it back into a
+ * response.
+ *
+ * It carries the status and message rather than a built `NextResponse`
+ * because HTTP is no longer the only caller: the MCP endpoint reuses the same
+ * ownership checks (src/lib/mcp) and needs to render "Agent not found" as a
+ * tool error, not as a 404 body it would have to unwrap.
  */
 export class ApiResponseError extends Error {
-  constructor(public readonly response: NextResponse) {
-    super("API response error");
+  constructor(
+    public readonly status: number,
+    message: string,
+  ) {
+    super(message);
+    this.name = "ApiResponseError";
+  }
+
+  /** The `{ error }` response this maps to over HTTP. */
+  get response(): NextResponse {
+    return jsonError(this.status, this.message);
   }
 }
 
@@ -57,7 +71,7 @@ export async function requireUser(): Promise<User> {
   const {
     data: { user },
   } = await supabase.auth.getUser();
-  if (!user) throw new ApiResponseError(jsonError(401, "Unauthorized"));
+  if (!user) throw new ApiResponseError(401, "Unauthorized");
   return user;
 }
 
@@ -75,10 +89,10 @@ export async function requireProjectAccess(
     .select("*")
     .eq("id", projectId)
     .maybeSingle();
-  if (error) throw new ApiResponseError(jsonError(500, error.message));
-  if (!project) throw new ApiResponseError(jsonError(404, "Project not found"));
+  if (error) throw new ApiResponseError(500, error.message);
+  if (!project) throw new ApiResponseError(404, "Project not found");
   if ((project as Project).owner_id !== userId) {
-    throw new ApiResponseError(jsonError(403, "Forbidden"));
+    throw new ApiResponseError(403, "Forbidden");
   }
   return project as Project;
 }
@@ -94,9 +108,9 @@ export async function requireWorkspaceAccess(
     .select("*")
     .eq("id", workspaceId)
     .maybeSingle();
-  if (error) throw new ApiResponseError(jsonError(500, error.message));
+  if (error) throw new ApiResponseError(500, error.message);
   if (!workspace) {
-    throw new ApiResponseError(jsonError(404, "Workspace not found"));
+    throw new ApiResponseError(404, "Workspace not found");
   }
   await requireProjectAccess(userId, (workspace as Workspace).project_id);
   return workspace as Workspace;
@@ -113,8 +127,8 @@ export async function requireRepoAccess(
     .select("*")
     .eq("id", repoId)
     .maybeSingle();
-  if (error) throw new ApiResponseError(jsonError(500, error.message));
-  if (!repo) throw new ApiResponseError(jsonError(404, "Repository not found"));
+  if (error) throw new ApiResponseError(500, error.message);
+  if (!repo) throw new ApiResponseError(404, "Repository not found");
   await requireWorkspaceAccess(userId, (repo as WorkspaceRepo).workspace_id);
   return repo as WorkspaceRepo;
 }
@@ -130,8 +144,8 @@ export async function requireAgentAccess(
     .select("*")
     .eq("id", agentId)
     .maybeSingle();
-  if (error) throw new ApiResponseError(jsonError(500, error.message));
-  if (!agent) throw new ApiResponseError(jsonError(404, "Agent not found"));
+  if (error) throw new ApiResponseError(500, error.message);
+  if (!agent) throw new ApiResponseError(404, "Agent not found");
   await requireProjectAccess(userId, (agent as Agent).project_id);
   return agent as Agent;
 }
@@ -147,8 +161,8 @@ export async function requireTaskAccess(
     .select("*")
     .eq("id", taskId)
     .maybeSingle();
-  if (error) throw new ApiResponseError(jsonError(500, error.message));
-  if (!task) throw new ApiResponseError(jsonError(404, "Task not found"));
+  if (error) throw new ApiResponseError(500, error.message);
+  if (!task) throw new ApiResponseError(404, "Task not found");
   await requireProjectAccess(userId, (task as Task).project_id);
   return task as Task;
 }
@@ -164,8 +178,8 @@ export async function requireRunAccess(
     .select("*")
     .eq("id", runId)
     .maybeSingle();
-  if (error) throw new ApiResponseError(jsonError(500, error.message));
-  if (!run) throw new ApiResponseError(jsonError(404, "Run not found"));
+  if (error) throw new ApiResponseError(500, error.message);
+  if (!run) throw new ApiResponseError(404, "Run not found");
   await requireTaskAccess(userId, (run as TaskRun).task_id);
   return run as TaskRun;
 }
@@ -181,9 +195,9 @@ export async function requirePendingActionAccess(
     .select("*")
     .eq("id", actionId)
     .maybeSingle();
-  if (error) throw new ApiResponseError(jsonError(500, error.message));
+  if (error) throw new ApiResponseError(500, error.message);
   if (!action) {
-    throw new ApiResponseError(jsonError(404, "Pending action not found"));
+    throw new ApiResponseError(404, "Pending action not found");
   }
   await requireProjectAccess(userId, (action as PendingActionRow).project_id);
   return action as PendingActionRow;
@@ -200,9 +214,9 @@ export async function requireScheduleAccess(
     .select("*")
     .eq("id", scheduleId)
     .maybeSingle();
-  if (error) throw new ApiResponseError(jsonError(500, error.message));
+  if (error) throw new ApiResponseError(500, error.message);
   if (!schedule) {
-    throw new ApiResponseError(jsonError(404, "Schedule not found"));
+    throw new ApiResponseError(404, "Schedule not found");
   }
   await requireProjectAccess(userId, (schedule as ScheduleRow).project_id);
   return schedule as ScheduleRow;
@@ -223,9 +237,9 @@ export async function requireKnowledgeAccess(
     .select("*")
     .eq("id", docId)
     .maybeSingle();
-  if (error) throw new ApiResponseError(jsonError(500, error.message));
+  if (error) throw new ApiResponseError(500, error.message);
   if (!data) {
-    throw new ApiResponseError(jsonError(404, "Knowledge doc not found"));
+    throw new ApiResponseError(404, "Knowledge doc not found");
   }
   const doc = data as AgentKnowledgeRow;
   if (doc.agent_id) {
@@ -234,7 +248,7 @@ export async function requireKnowledgeAccess(
     await requireProjectAccess(userId, doc.project_id);
   } else {
     // Unreachable: the scope check constraint guarantees one of the two.
-    throw new ApiResponseError(jsonError(500, "Knowledge doc has no scope"));
+    throw new ApiResponseError(500, "Knowledge doc has no scope");
   }
   return doc;
 }
@@ -257,7 +271,8 @@ export async function parseBody<S extends z.ZodTypeAny>(
   const parsed = schema.safeParse(candidate);
   if (!parsed.success) {
     throw new ApiResponseError(
-      jsonError(400, parsed.error.errors[0]?.message ?? "Invalid request"),
+      400,
+      parsed.error.errors[0]?.message ?? "Invalid request",
     );
   }
   return parsed.data;

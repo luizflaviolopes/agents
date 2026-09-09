@@ -72,6 +72,10 @@ table (PostgREST and Realtime `postgres_changes` return nothing for it).
 - **The worker keeps using `SUPABASE_SERVICE_ROLE_KEY`** exactly as before
   (its Realtime subscriptions still work — service role is unaffected by the
   revokes).
+- **Non-browser clients present a personal access token** (`api_tokens`,
+  migration 0012) and are accepted at `/api/mcp` only — see "Fleet MCP
+  endpoint" below. The token identifies the owner; every ownership check then
+  runs exactly as it does for a cookie session.
 - The web UI no longer subscribes to Realtime; it **polls** the API routes
   (see "Task queue" below).
 
@@ -169,9 +173,16 @@ All web data access goes through route handlers under
 `apps/web/src/app/api/`: `projects` (+`[id]`, and nested `workspaces`,
 `agents`, `tasks`, `messages`, `activity`), `workspaces/[wsId]` (+`repos`),
 `repos/[repoId]`, `agents/[agentId]`, `tasks/[taskId]` (+`runs`),
-`runs/[runId]/logs`, `profile` (+`telegram-code`), and `agent-builder`.
-Every route calls `requireUser()` and the relevant ownership check before
-touching the database with the admin client.
+`runs/[runId]/logs`, `profile` (+`telegram-code`, `tokens`), `agent-builder`,
+and `mcp` (the fleet's own MCP endpoint — see below). Every route calls
+`requireUser()` and the relevant ownership check before touching the database
+with the admin client; `/api/mcp` is the one exception, authenticating a
+personal access token instead of the session cookie and then running the same
+ownership checks.
+
+Agent CRUD itself lives in `apps/web/src/lib/agents/service.ts` rather than in
+the route files, because the MCP endpoint performs the same operations and the
+fleet's rules must not depend on which door you came through.
 
 Payload validation lives in `packages/shared/src/schemas.ts` (zod):
 `createProjectSchema`, `createWorkspaceSchema`, `addWorkspaceRepoSchema`,
@@ -636,6 +647,49 @@ people who are not the project owner.
   handles this, and returns `{}` for pre-0009 rows, so the code is safe to
   deploy before the migration). Fleet MCP tools are not built-ins and stay
   available regardless.
+
+## Fleet MCP endpoint (migration 0012)
+
+The fleet is itself an **MCP server**: `POST /api/mcp`
+(`apps/web/src/app/api/mcp/route.ts`) lets an MCP client on the owner's own
+machine — Claude Code, typically — read and change the agents of their
+account. Guide: [docs/FLEET-MCP-SERVER.md](docs/FLEET-MCP-SERVER.md).
+
+- **Personal access tokens** (`api_tokens`, 0012) authenticate it. The session
+  cookie every other route reads is unobtainable outside a browser, and the
+  workarounds for that end with a password in a config file. Minted in
+  Settings, the plaintext is returned once and only a SHA-256 is stored;
+  verification hashes what was presented and selects by hash, so no comparison
+  against a stored secret ever runs. Scope is the whole account, stated as
+  such rather than implied narrower — the real controls are that **no other
+  route accepts a token** (so a token cannot mint another one) and per-token
+  revocation.
+- **Stateless Streamable HTTP, hand-rolled** (`apps/web/src/lib/mcp/
+  protocol.ts`). The MCP SDK's server transports speak Node's
+  `IncomingMessage`/`ServerResponse`; a Next.js route handler gets a Web
+  `Request`. At this surface area the adapter costs more than the protocol:
+  `initialize`, `ping`, `tools/list`, `tools/call`, notifications dropped, one
+  JSON response per POST. No session id is issued, `GET` answers 405 (no
+  server-initiated stream), and no CORS headers are set — which is the
+  DNS-rebinding protection the transport spec asks for, obtained by not opting
+  out of the same-origin policy.
+- **One service layer, two callers.** The tools
+  (`apps/web/src/lib/mcp/tools.ts`) and the `/api/agents` route handlers both
+  go through `apps/web/src/lib/agents/service.ts`, so the fleet's rules — the
+  manager is never deleted or re-roled, one librarian per project, a
+  `workspace_id` must belong to the same owner — hold identically from either
+  door. `ApiResponseError` carries a status and a message rather than a built
+  `NextResponse` for the same reason: HTTP renders it as a body, MCP as a tool
+  error.
+- **Secrets read back redacted.** `mcp_servers[].env` and `.headers` values
+  come back as `__redacted__` — the same instinct as the 0010 approval gate,
+  which exists so a write credential never enters an LLM session. Because
+  array fields replace wholesale, the placeholder is also accepted inbound,
+  where it means *keep what is stored* (matched by server name and key); a
+  placeholder with nothing behind it is an error rather than a literal write.
+- **Tool failures are results, not transport errors** (`isError: true` with the
+  message as content). A model that reads `Project not found` can correct
+  itself; a JSON-RPC error just ends the call.
 
 ## Environment
 

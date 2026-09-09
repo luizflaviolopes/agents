@@ -85,6 +85,13 @@ agents.
   together, so the cross-service seams get reviewed and not just each PR on its
   own. One agent on two read-only credentials, with a fan-out-by-service mode
   for oversized tickets.
+- **Fleet MCP server** —
+  [docs/FLEET-MCP-SERVER.md](docs/FLEET-MCP-SERVER.md): the mirror image of
+  the guides above. The fleet exposes its *own* MCP server at `/api/mcp`, so
+  Claude Code on your machine can read and change the agents of your account —
+  instructions, model, MCP servers, tool limits, who exists at all. Covers the
+  personal access tokens that authenticate it, the tool list, and why an
+  agent's stored secrets read back redacted.
 
 ## Repository layout
 
@@ -133,6 +140,18 @@ Apply **all** migrations in `supabase/migrations/`, in filename order:
 - `0004_cost_tracking.sql` — token/cost columns on `task_runs`.
 - `0005_pm_librarian.sql` — daily schedules, per-agent chat threads,
   project-scoped knowledge with provenance, the librarian role.
+- `0006_knowledge_sweep.sql` — coalesced post-run knowledge sweeps.
+- `0007_knowledge_search.sql` — full-text search over the knowledge base.
+- `0008_task_fanout.sql` — asynchronous fan-out and fan-in for agent-spawned
+  work.
+- `0009_agent_tool_limits.sql` — per-agent allow/deny lists over the SDK's
+  built-in tools.
+- `0010_mcp_approval.sql` — approval-gated MCP tool calls; github/notion as
+  write-credential integrations.
+- `0011_manager_message_claim.sql` — a durable claim on user messages, so one
+  message is handled once.
+- `0012_api_tokens.sql` — personal access tokens, which authenticate the
+  fleet's own MCP endpoint (`/api/mcp`).
 
 **Option A — Supabase CLI (recommended):**
 
@@ -144,7 +163,7 @@ npx supabase db push
 
 **Option B — SQL editor:** open your project's *SQL Editor* in the Supabase
 dashboard and run each migration file's contents, one at a time, in
-filename order (`0001` → `0005`).
+filename order (`0001` → `0012`).
 
 ### 3. Get your Supabase keys
 

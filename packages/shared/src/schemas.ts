@@ -301,3 +301,14 @@ export const upsertIntegrationSchema = z.object({
   config: z.record(z.unknown()),
 });
 export type UpsertIntegrationInput = z.infer<typeof upsertIntegrationSchema>;
+
+// ---------------------------------------------------------------------------
+// Personal access tokens (migration 0012)
+// ---------------------------------------------------------------------------
+
+export const createApiTokenSchema = z.object({
+  name: z.string().min(1).max(120),
+  /** Days until the token expires. Omitted = no expiry. */
+  expiresInDays: z.number().int().min(1).max(3650).optional(),
+});
+export type CreateApiTokenInput = z.infer<typeof createApiTokenSchema>;

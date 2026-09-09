@@ -188,6 +188,31 @@ export interface Profile {
   created_at: string; // timestamptz
 }
 
+/**
+ * A personal access token (0012): what authenticates a client that has no
+ * browser session — today, an MCP client on the owner's machine talking to
+ * /api/mcp. Full account scope; revoked per token.
+ */
+export interface ApiTokenRow {
+  id: string;
+  user_id: string;
+  name: string;
+  /** SHA-256 hex of the plaintext. The plaintext itself is never stored. */
+  token_hash: string;
+  /** Leading characters of the plaintext, shown so tokens can be told apart. */
+  hint: string;
+  expires_at: string | null;
+  revoked_at: string | null;
+  last_used_at: string | null;
+  created_at: string;
+}
+
+/**
+ * An api_tokens row as the API hands it back — never `token_hash`, the one
+ * column no client has any business reading.
+ */
+export type ApiTokenSummary = Omit<ApiTokenRow, "token_hash">;
+
 export interface Project {
   id: string;
   owner_id: string;
