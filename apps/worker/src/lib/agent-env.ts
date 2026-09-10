@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { Agent, AgentAuthMode } from "@agent-fleet/shared";
+import { connectorDeniedTools } from "@agent-fleet/shared";
 
 /**
  * The worker's own secrets, kept out of the environment an agent's shell
@@ -127,20 +128,29 @@ export const NO_SUBSCRIPTION_CREDENTIAL_ERROR =
   "CLAUDE_CODE_OAUTH_TOKEN, or switch this agent's auth mode back to 'api'.";
 
 /**
- * An agent's built-in tool limits (0009), as SDK options.
+ * An agent's tool limits, as SDK options: the owner's built-in allow/deny
+ * lists (0009) plus whatever its connectors forbid.
  *
  * `tools` is the base set of built-in tools; an EMPTY array disables all of
  * them, so an empty allow-list has to be omitted rather than passed through —
  * "no allow-list configured" and "allow nothing" are opposite intents that
  * would otherwise collide. `disallowedTools` removes tools from the model's
  * context and is safe to pass whenever it is non-empty.
+ *
+ * Connector blocks are merged in here rather than written into
+ * `agents.disallowed_tools` when the connector is configured, so that they
+ * are not editable in the tool-limits box and so a tool the catalog blocks
+ * later is blocked on the next run of an agent configured today. The
+ * allow-list does not re-open them: `disallowedTools` is applied on top.
  */
 export function buildToolLimits(agent: Agent): {
   tools?: string[];
   disallowedTools?: string[];
 } {
   const allowed = agent.allowed_tools ?? [];
-  const disallowed = agent.disallowed_tools ?? [];
+  const disallowed = [
+    ...new Set([...(agent.disallowed_tools ?? []), ...connectorDeniedTools(agent.mcp_servers)]),
+  ];
   return {
     ...(allowed.length > 0 ? { tools: allowed } : {}),
     ...(disallowed.length > 0 ? { disallowedTools: disallowed } : {}),

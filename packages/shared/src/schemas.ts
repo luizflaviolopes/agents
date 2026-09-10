@@ -6,6 +6,7 @@ import {
   INTEGRATION_TYPES,
   MCP_APPROVAL_POLICIES,
 } from "./constants";
+import { CONNECTOR_IDS } from "./connectors";
 
 // ---------------------------------------------------------------------------
 // API payload schemas (camelCase — API layer maps to snake_case DB columns)
@@ -60,6 +61,12 @@ export const mcpServerSchema = z.object({
    * for approved calls, instead of the env/headers above (0010).
    */
   integration: z.enum(INTEGRATION_TYPES).optional(),
+  /**
+   * Catalog entry this server was built from, when it came from one. Drives
+   * the credential form in the UI and the run-time tool block in the worker
+   * — see McpServerConfig.connector.
+   */
+  connector: z.enum(CONNECTOR_IDS).optional(),
 });
 export type McpServerInput = z.infer<typeof mcpServerSchema>;
 

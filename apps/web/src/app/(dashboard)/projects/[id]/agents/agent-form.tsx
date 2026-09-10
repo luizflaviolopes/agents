@@ -1,20 +1,32 @@
 "use client";
 
 import * as React from "react";
-import { Plus, Trash2, X } from "lucide-react";
+import { ChevronDown, Plus, ShieldCheck, Trash2, X } from "lucide-react";
 import type {
   Agent,
   AgentAuthMode,
+  ConnectorDefinition,
   McpApprovalPolicy,
   McpServerConfig,
   McpServerType,
 } from "@agent-fleet/shared";
 import {
+  buildConnectorServer,
+  CONNECTOR_IDS,
+  CONNECTORS,
   DEFAULT_AGENT_AUTH_MODE,
   DEFAULT_MODEL,
+  getConnector,
   MCP_INTEGRATION_TYPES,
+  readConnectorCredentials,
 } from "@agent-fleet/shared";
 import { Button } from "@/components/ui/button";
+import {
+  Dropdown,
+  DropdownItem,
+  DropdownLabel,
+  DropdownSeparator,
+} from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select } from "@/components/ui/select";
@@ -41,9 +53,17 @@ export interface McpServerRow {
   askTools: string;
   /** Integration holding the write token, or "" for none. */
   integration: string;
+  /** Catalog entry this row came from, or "" when hand-configured. */
+  connector: string;
+  /**
+   * Connector credential values keyed by field key. Kept apart from `env` /
+   * `headers` so the form never has to guess which raw variable is a secret;
+   * the catalog says, and `rowToMcpConfig` does the mapping on the way out.
+   */
+  credentials: Record<string, string>;
 }
 
-/** A fresh, ungated server row — the shape "Add server" starts from. */
+/** A fresh, ungated server row — the shape "Custom server" starts from. */
 export function emptyMcpServerRow(): McpServerRow {
   return {
     name: "",
@@ -56,6 +76,22 @@ export function emptyMcpServerRow(): McpServerRow {
     approval: "never",
     askTools: "",
     integration: "",
+    connector: "",
+    credentials: {},
+  };
+}
+
+/**
+ * A row for a catalog connector. Only the name and the credentials are the
+ * owner's to fill in — command, args and variable names come from the
+ * definition, which is the point of having one.
+ */
+export function connectorServerRow(def: ConnectorDefinition): McpServerRow {
+  return {
+    ...emptyMcpServerRow(),
+    name: def.defaultServerName,
+    type: def.transport.type,
+    connector: def.id,
   };
 }
 
@@ -116,7 +152,13 @@ export function agentToForm(agent: Agent): AgentFormValue {
 }
 
 export function mcpConfigToRow(config: McpServerConfig): McpServerRow {
+  // An unrecognised connector id (a config written by a newer deploy) falls
+  // through to the raw fields rather than rendering an empty form over
+  // credentials the owner can then no longer see.
+  const def = getConnector(config.connector);
   return {
+    connector: def?.id ?? "",
+    credentials: def ? readConnectorCredentials(def, config) : {},
     name: config.name,
     type: config.type,
     command: config.command ?? "",
@@ -154,7 +196,8 @@ function parseKeyValueLines(text: string): Record<string, string> {
   return out;
 }
 
-export function rowToMcpConfig(row: McpServerRow): McpServerConfig {
+/** The transport half of a hand-configured row. */
+function manualMcpConfig(row: McpServerRow): McpServerConfig {
   const config: McpServerConfig = {
     name: row.name.trim(),
     type: row.type,
@@ -172,6 +215,14 @@ export function rowToMcpConfig(row: McpServerRow): McpServerConfig {
     const headers = parseKeyValueLines(row.headers);
     if (Object.keys(headers).length > 0) config.headers = headers;
   }
+  return config;
+}
+
+export function rowToMcpConfig(row: McpServerRow): McpServerConfig {
+  const def = getConnector(row.connector);
+  const config = def
+    ? buildConnectorServer(def, row.name, row.credentials)
+    : manualMcpConfig(row);
   // Approval settings (0010). 'never' and an empty tool list are the absent
   // state, so an ungated server serialises exactly as it did before 0010.
   if (row.approval === "ask") {
@@ -183,6 +234,26 @@ export function rowToMcpConfig(row: McpServerRow): McpServerConfig {
     }
   }
   return config;
+}
+
+/**
+ * The first connector credential left blank, named for an error message, or
+ * null when every connector row is complete.
+ *
+ * Only connector rows are checked: a hand-configured server has no field the
+ * form can call required, because it does not know what the server needs.
+ */
+export function missingConnectorCredential(rows: McpServerRow[]): string | null {
+  for (const row of rows) {
+    const def = getConnector(row.connector);
+    if (!def) continue;
+    for (const field of def.fields) {
+      if (!(row.credentials[field.key] ?? "").trim()) {
+        return `${def.label} connector's "${field.label}"`;
+      }
+    }
+  }
+  return null;
 }
 
 export function AgentForm({
@@ -420,15 +491,39 @@ export function AgentForm({
       <div className="space-y-2">
         <div className="flex items-center justify-between">
           <Label>MCP servers</Label>
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            onClick={() => set("mcpServers", [...value.mcpServers, emptyMcpServerRow()])}
+          <Dropdown
+            align="end"
+            trigger={
+              <Button type="button" variant="outline" size="sm">
+                <Plus />
+                Add
+                <ChevronDown />
+              </Button>
+            }
           >
-            <Plus />
-            Add server
-          </Button>
+            <DropdownLabel>Connectors</DropdownLabel>
+            {CONNECTOR_IDS.map((id) => (
+              <DropdownItem
+                key={id}
+                onClick={() =>
+                  set("mcpServers", [
+                    ...value.mcpServers,
+                    connectorServerRow(CONNECTORS[id]),
+                  ])
+                }
+              >
+                {CONNECTORS[id].label}
+              </DropdownItem>
+            ))}
+            <DropdownSeparator />
+            <DropdownItem
+              onClick={() =>
+                set("mcpServers", [...value.mcpServers, emptyMcpServerRow()])
+              }
+            >
+              Custom server…
+            </DropdownItem>
+          </Dropdown>
         </div>
         {value.mcpServers.length === 0 ? (
           <p className="text-xs text-muted-foreground">
@@ -436,7 +531,46 @@ export function AgentForm({
           </p>
         ) : (
           <div className="space-y-3">
-            {value.mcpServers.map((server, index) => (
+            {value.mcpServers.map((server, index) => {
+              const connector = getConnector(server.connector);
+              const remove = (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  aria-label="Remove server"
+                  onClick={() =>
+                    set(
+                      "mcpServers",
+                      value.mcpServers.filter((_, i) => i !== index),
+                    )
+                  }
+                >
+                  <Trash2 />
+                </Button>
+              );
+
+              if (connector) {
+                return (
+                  <div
+                    key={index}
+                    className="space-y-2 rounded-lg border border-border p-3"
+                  >
+                    <ConnectorFields
+                      def={connector}
+                      server={server}
+                      onChange={(patch) => updateServer(index, patch)}
+                      remove={remove}
+                    />
+                    <McpApprovalFields
+                      server={server}
+                      onChange={(patch) => updateServer(index, patch)}
+                    />
+                  </div>
+                );
+              }
+
+              return (
               <div
                 key={index}
                 className="space-y-2 rounded-lg border border-border p-3"
@@ -467,20 +601,7 @@ export function AgentForm({
                       <option value="sse">sse</option>
                     </Select>
                   </div>
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="icon"
-                    aria-label="Remove server"
-                    onClick={() =>
-                      set(
-                        "mcpServers",
-                        value.mcpServers.filter((_, i) => i !== index),
-                      )
-                    }
-                  >
-                    <Trash2 />
-                  </Button>
+                  {remove}
                 </div>
                 {server.type === "stdio" ? (
                   <div className="grid grid-cols-2 gap-2">
@@ -558,7 +679,8 @@ export function AgentForm({
                   onChange={(patch) => updateServer(index, patch)}
                 />
               </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </div>
@@ -567,6 +689,93 @@ export function AgentForm({
 }
 
 /* ------------------------------------------------------------------------ */
+
+/**
+ * One connector row: the server name, the catalog's credential fields, and
+ * what the connector refuses to let the agent do.
+ *
+ * Command, args and the environment-variable names are deliberately absent.
+ * They are the part of an MCP entry the owner has no way to check and every
+ * way to get subtly wrong, and they are exactly what the definition exists
+ * to supply. Everything shown here is something only the owner can provide.
+ */
+function ConnectorFields({
+  def,
+  server,
+  onChange,
+  remove,
+}: {
+  def: ConnectorDefinition;
+  server: McpServerRow;
+  onChange: (patch: Partial<McpServerRow>) => void;
+  remove: React.ReactNode;
+}) {
+  return (
+    <div className="space-y-2">
+      <div className="grid grid-cols-[1fr_auto] items-end gap-2">
+        <div className="space-y-1">
+          <Label className="text-xs text-muted-foreground">
+            {def.label} — name
+          </Label>
+          <Input
+            placeholder={def.defaultServerName}
+            value={server.name}
+            onChange={(e) => onChange({ name: e.target.value })}
+          />
+        </div>
+        {remove}
+      </div>
+      <p className="text-xs text-muted-foreground">
+        {def.summary} The name prefixes its tools (
+        <code>mcp__{server.name.trim() || def.defaultServerName}__…</code>) —
+        change it only to run two of these on one agent.
+      </p>
+
+      {def.fields.map((field) => (
+        <div key={field.key} className="space-y-1">
+          <Label className="text-xs text-muted-foreground">{field.label}</Label>
+          <Input
+            type={field.secret ? "password" : "text"}
+            autoComplete="off"
+            placeholder={field.placeholder}
+            value={server.credentials[field.key] ?? ""}
+            onChange={(e) =>
+              onChange({
+                credentials: {
+                  ...server.credentials,
+                  [field.key]: e.target.value,
+                },
+              })
+            }
+          />
+          {field.help && (
+            <p className="text-xs text-muted-foreground">{field.help}</p>
+          )}
+        </div>
+      ))}
+
+      <p className="flex gap-1.5 text-xs text-muted-foreground">
+        <ShieldCheck className="mt-0.5 size-3.5 shrink-0" />
+        <span>
+          <strong className="font-medium text-foreground">
+            Blocked for this agent:
+          </strong>{" "}
+          {def.blockedToolsNote} Enforced by the runtime, not by instructions —
+          the agent never sees these tools.
+          {def.integration && (
+            <>
+              {" "}
+              Outbound messages go through the approval gate and are sent with
+              the project&apos;s <strong>{def.integration}</strong> integration,
+              which you configure separately.
+            </>
+          )}{" "}
+          Setup: <code>{def.docsPath}</code>.
+        </span>
+      </p>
+    </div>
+  );
+}
 
 /**
  * Approval policy for one MCP server (0010).

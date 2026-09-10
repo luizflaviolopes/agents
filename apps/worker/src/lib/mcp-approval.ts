@@ -1,4 +1,5 @@
 import type { McpServerConfig } from "@agent-fleet/shared";
+import { SDK_TOOL_PREFIX, sdkToolName } from "@agent-fleet/shared";
 
 /**
  * Which of an agent's MCP tool calls need the owner's approval, and how the
@@ -15,19 +16,18 @@ import type { McpServerConfig } from "@agent-fleet/shared";
  * forty times a day is an approval prompt the owner stops reading.
  */
 
-/** Prefix the Agent SDK gives a tool from a named MCP server. */
-const SDK_TOOL_PREFIX = "mcp__";
-
 /** One approval-gated call: the configured server, plus the bare tool name. */
 export interface GatedCall {
   server: McpServerConfig;
   tool: string;
 }
 
-/** The SDK's name for `tool` on `server` — `mcp__<server>__<tool>`. */
-export function sdkToolName(serverName: string, tool: string): string {
-  return `${SDK_TOOL_PREFIX}${serverName}__${tool}`;
-}
+/**
+ * The SDK tool-name format lives in shared, because the connector catalog
+ * writes the same names for its run-time tool blocks. Two spellings of one
+ * wire format is how a gate quietly stops matching.
+ */
+export { sdkToolName };
 
 /** Case-insensitive lookup of a configured server by name. */
 export function findServer(

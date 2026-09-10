@@ -1,7 +1,7 @@
 import "server-only";
 import { z } from "zod";
 import type { Agent, McpServerConfig } from "@agent-fleet/shared";
-import { AGENT_AUTH_MODES, mcpServerSchema } from "@agent-fleet/shared";
+import { AGENT_AUTH_MODES, CONNECTOR_IDS, mcpServerSchema } from "@agent-fleet/shared";
 import { ApiResponseError, requireProjectAccess } from "@/lib/api/auth";
 import {
   createAgent,
@@ -202,6 +202,15 @@ const mcpServerJsonSchema = {
       enum: ["slack", "gmail", "github", "notion"],
       description:
         "Project integration holding the write credential used for approved calls.",
+    },
+    connector: {
+      type: "string",
+      enum: [...CONNECTOR_IDS],
+      description:
+        "Catalog connector this entry is. Set it and the worker denies that " +
+        "connector's blocked tools at run time; command/args/url and the " +
+        "credential variable names must still match the definition in " +
+        "packages/shared/src/connectors.ts.",
     },
   },
 } as const;

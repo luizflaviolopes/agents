@@ -3,6 +3,8 @@
  * supabase/migrations/. Keep the two in sync.
  */
 
+import type { ConnectorId } from "./connectors";
+
 // ---------------------------------------------------------------------------
 // Enum-ish string-literal unions (mirror the CHECK constraints)
 // ---------------------------------------------------------------------------
@@ -147,6 +149,17 @@ export interface McpServerConfig {
    * prompt injection away from being used unasked.
    */
   integration?: IntegrationType;
+  /**
+   * Set when this entry came from the connector catalog
+   * (`packages/shared/src/connectors.ts`) rather than being filled in by hand.
+   *
+   * Two things read it: the agent form, which renders the connector's
+   * labelled credential fields instead of raw command/env boxes, and the
+   * worker, which denies the connector's blocked tools at run time. An id
+   * neither recognises is ignored by both, so a config written by a newer
+   * deploy degrades to a plain hand-configured server instead of failing.
+   */
+  connector?: ConnectorId;
 }
 
 /** Payload for pending_actions of type 'slack_reply' | 'slack_message'. */

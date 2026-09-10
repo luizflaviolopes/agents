@@ -5,6 +5,7 @@ import {
   BookOpen,
   Bot,
   FolderGit2,
+  LayoutTemplate,
   Pencil,
   Plus,
   Plug,
@@ -12,7 +13,8 @@ import {
   Sparkles,
   Trash2,
 } from "lucide-react";
-import type { Agent, McpServerConfig, Workspace } from "@agent-fleet/shared";
+import type { Agent, AgentTemplate, McpServerConfig, Workspace } from "@agent-fleet/shared";
+import { AGENT_TEMPLATES } from "@agent-fleet/shared";
 import { api } from "@/lib/api-client";
 import { formatUsd } from "@/lib/format";
 import { Button } from "@/components/ui/button";
@@ -37,6 +39,7 @@ import {
   agentToForm,
   emptyAgentForm,
   mcpConfigToRow,
+  missingConnectorCredential,
   rowToMcpConfig,
   type AgentFormValue,
 } from "./agent-form";
@@ -296,8 +299,11 @@ function CreateAgentDialog({
   librarianTaken: boolean;
   onCreated: (agent: Agent) => void;
 }) {
-  const [tab, setTab] = React.useState<"manual" | "builder">("manual");
+  const [tab, setTab] = React.useState<"manual" | "template" | "builder">(
+    "manual",
+  );
   const [form, setForm] = React.useState<AgentFormValue>(emptyAgentForm());
+  const [template, setTemplate] = React.useState<AgentTemplate | null>(null);
   const [idea, setIdea] = React.useState("");
   const [builderNote, setBuilderNote] = React.useState<string | null>(null);
   const [needsWorkspace, setNeedsWorkspace] = React.useState(false);
@@ -309,10 +315,24 @@ function CreateAgentDialog({
   function reset() {
     setTab("manual");
     setForm(emptyAgentForm());
+    setTemplate(null);
     setIdea("");
     setBuilderNote(null);
     setNeedsWorkspace(false);
     setHasDraft(false);
+    setError(null);
+  }
+
+  /** Pre-fills the form from a template, secret placeholders and all. */
+  function pickTemplate(picked: AgentTemplate) {
+    setForm({
+      ...emptyAgentForm(),
+      name: picked.agentName,
+      role: picked.role === "librarian" ? "librarian" : "specialist",
+      instructions: picked.instructions,
+      mcpServers: picked.mcpServers.map(mcpConfigToRow),
+    });
+    setTemplate(picked);
     setError(null);
   }
 
@@ -364,6 +384,15 @@ function CreateAgentDialog({
       setError("Give the agent a name.");
       return;
     }
+    // A template's connectors arrive with empty credential fields. Saving
+    // one blank produces an agent that fails on its first run with an auth
+    // error from inside a spawned process, which is a bad place to learn
+    // that a token was never pasted.
+    const missing = missingConnectorCredential(form.mcpServers);
+    if (missing) {
+      setError(`Fill in the ${missing} before creating this agent.`);
+      return;
+    }
     setBusy(true);
     let created: Agent;
     try {
@@ -411,22 +440,94 @@ function CreateAgentDialog({
         <DialogHeader>
           <DialogTitle>New agent</DialogTitle>
           <DialogDescription>
-            Configure a specialist agent by hand, or describe it and let Claude
-            draft the configuration.
+            Start from a ready-made template, configure a specialist agent by
+            hand, or describe it and let Claude draft the configuration.
           </DialogDescription>
         </DialogHeader>
 
         <Tabs
           value={tab}
-          onValueChange={(v) => setTab(v as "manual" | "builder")}
+          onValueChange={(v) => setTab(v as "manual" | "template" | "builder")}
         >
           <TabsList>
             <TabsTrigger value="manual">Manual</TabsTrigger>
+            <TabsTrigger value="template">
+              <LayoutTemplate className="mr-1.5 size-3.5" />
+              From template
+            </TabsTrigger>
             <TabsTrigger value="builder">
               <Sparkles className="mr-1.5 size-3.5" />
               Describe it
             </TabsTrigger>
           </TabsList>
+
+          <TabsContent value="template">
+            {!template ? (
+              <div className="space-y-3">
+                {AGENT_TEMPLATES.map((option) => (
+                  <button
+                    key={option.id}
+                    type="button"
+                    onClick={() => pickTemplate(option)}
+                    className="w-full rounded-lg border p-3 text-left transition-colors hover:border-primary/50 hover:bg-accent"
+                  >
+                    <p className="font-medium">{option.title}</p>
+                    <p className="mt-1 text-sm text-muted-foreground">
+                      {option.summary}
+                    </p>
+                  </button>
+                ))}
+                <DialogFooter className="mt-0">
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    onClick={() => onOpenChange(false)}
+                  >
+                    Cancel
+                  </Button>
+                </DialogFooter>
+              </div>
+            ) : (
+              <form onSubmit={save} className="space-y-4">
+                <div className="rounded-lg border border-primary/30 bg-primary/5 p-3 text-sm">
+                  <p className="font-medium">Before this agent can work:</p>
+                  <ol className="mt-1.5 list-decimal space-y-1 pl-5 text-muted-foreground">
+                    {template.setupSteps.map((step) => (
+                      <li key={step}>{step}</li>
+                    ))}
+                  </ol>
+                  <p className="mt-2 text-xs text-muted-foreground">
+                    Full walkthrough: <code>{template.docsPath}</code>
+                  </p>
+                </div>
+                <div className="max-h-[46vh] overflow-y-auto pr-1">
+                  <AgentForm
+                    value={form}
+                    onChange={setForm}
+                    workspaces={workspaces}
+                    librarianTaken={librarianTaken}
+                  />
+                </div>
+                {error && <p className="text-sm text-destructive">{error}</p>}
+                <DialogFooter className="mt-0">
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    onClick={() => {
+                      setTemplate(null);
+                      setForm(emptyAgentForm());
+                      setError(null);
+                    }}
+                  >
+                    Back
+                  </Button>
+                  <Button type="submit" disabled={busy}>
+                    {busy ? "Creating…" : "Create agent"}
+                  </Button>
+                </DialogFooter>
+              </form>
+            )}
+          </TabsContent>
 
           <TabsContent value="manual">
             <form onSubmit={save} className="space-y-4">

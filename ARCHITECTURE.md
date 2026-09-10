@@ -329,6 +329,60 @@ arrays (`PENDING_ACTION_TYPES`, `PENDING_ACTION_STATUSES`,
 `KNOWLEDGE_KINDS`, `INTEGRATION_TYPES`) in
 `packages/shared/src/constants.ts`.
 
+## Connector catalog (no migration)
+
+`packages/shared/src/connectors.ts` is a table of named presets that expand
+into an `McpServerConfig`. No DDL: a connector entry is an ordinary row in
+the existing `agents.mcp_servers` jsonb, carrying one extra field,
+`connector`, naming the catalog entry it came from.
+
+A `ConnectorDefinition` fixes the three things a hand-written MCP entry gets
+wrong, each of which fails somewhere different — the wrong package (a spawn
+error), a credential in the wrong variable (an auth error), and a
+write-capable tool left reachable (nothing, until an email is sent that
+nobody approved):
+
+- `transport` + `target` — the command, the arguments, and which environment
+  variable or header each credential belongs in. The UI renders `fields`
+  (label, placeholder, secret-or-not) and derives the rest, so the owner is
+  only ever asked for things only the owner has.
+- `blockedTools` — bare tool names the agent must never reach.
+  `connectorDeniedTools()` compiles them to `mcp__<server>__<tool>` against
+  the agent's OWN server names (a renamed server still resolves), and
+  `buildToolLimits` (`apps/worker/src/lib/agent-env.ts`) merges them into the
+  SDK's `disallowedTools` at run time.
+
+Run time, not save time, and deliberately: the block is then not editable in
+the agent's tool-limits box, and a tool the catalog blocks tomorrow is
+blocked on the next run of an agent configured today. This is a capability
+limit like 0009's, not an instruction — the distinction that matters for
+agents whose entire input is untrusted text, which is every comms agent.
+
+What a connector is NOT is the credential an outbound action is sent with.
+That stays in the project integration, where only the deterministic executor
+reaches it (see the approval gate above). A connector is the read side;
+`integration` on the definition only tells the UI what the owner still has to
+configure.
+
+Unknown ids degrade rather than fail: `getConnector` returns undefined, the
+form falls back to the raw command/env boxes, and the worker denies nothing —
+so a config written by a newer deploy does not break an older one mid-rollout.
+
+Adding a connector is one entry in `CONNECTORS` plus its id in
+`CONNECTOR_IDS`; the form, the zod schema (`mcpServerSchema.connector`) and
+the fleet MCP endpoint's advertised JSON Schema all read the catalog. Slack
+(`slack-mcp-server`, on a `xoxp-` user token so an approved reply posts as
+the owner rather than as a bot) and Gmail (`@shinzolabs/gmail-mcp`) are the
+first two — see [docs/COMMS-AGENTS.md](docs/COMMS-AGENTS.md).
+
+`packages/shared/src/agent-templates.ts` sits one layer above: a template is
+a whole agent — name, instructions, the connectors it uses, and the setup
+steps that remain the owner's — offered in the create-agent dialog's *From
+template* tab. It names connectors instead of restating them, so the catalog
+stays the only place that knows how to reach a service, and its servers
+arrive with the credential fields empty, which is why no template holds a
+secret.
+
 ## Project management & librarian layer (migration 0005)
 
 `supabase/migrations/0005_pm_librarian.sql` extends `schedules`,
@@ -646,7 +700,9 @@ people who are not the project owner.
   configured" and "allow nothing" would otherwise collide (`buildToolLimits`
   handles this, and returns `{}` for pre-0009 rows, so the code is safe to
   deploy before the migration). Fleet MCP tools are not built-ins and stay
-  available regardless.
+  available regardless. `buildToolLimits` also merges in whatever the agent's
+  connectors block (see "Connector catalog"), which is the one part of
+  `disallowedTools` the owner cannot edit away.
 
 ## Agent auth mode (migration 0013)
 
