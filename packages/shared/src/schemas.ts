@@ -1,5 +1,7 @@
 import { z } from "zod";
 import {
+  AGENT_AUTH_MODES,
+  DEFAULT_AGENT_AUTH_MODE,
   DEFAULT_MODEL,
   INTEGRATION_TYPES,
   MCP_APPROVAL_POLICIES,
@@ -72,6 +74,8 @@ export const createAgentSchema = z.object({
   /** Built-in SDK tool limits (0009); empty arrays = unrestricted. */
   allowedTools: z.array(z.string()).default([]),
   disallowedTools: z.array(z.string()).default([]),
+  /** Credential the agent's runs authenticate with (0013). */
+  authMode: z.enum(AGENT_AUTH_MODES).default(DEFAULT_AGENT_AUTH_MODE),
 });
 export type CreateAgentInput = z.infer<typeof createAgentSchema>;
 

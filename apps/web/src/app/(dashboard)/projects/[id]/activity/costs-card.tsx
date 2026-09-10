@@ -20,6 +20,8 @@ export interface ProjectCosts {
     cacheReadTokens: number;
     cacheCreationTokens: number;
     runs: number;
+    /** Runs on the worker's Claude Code subscription — quota, not dollars. */
+    unbilledRuns: number;
   };
   byAgent: Array<{
     agentId: string | null;
@@ -29,6 +31,7 @@ export interface ProjectCosts {
     inputTokens: number;
     outputTokens: number;
     runs: number;
+    unbilledRuns: number;
   }>;
 }
 
@@ -89,6 +92,15 @@ export function CostsCard({ projectId }: { projectId: string }) {
               </span>
             </div>
 
+            {/* Subscription runs (0013) do real work this total cannot price. */}
+            {data.totals.unbilledRuns > 0 && (
+              <p className="mt-1 text-xs text-muted-foreground">
+                Excludes {data.totals.unbilledRuns} run
+                {data.totals.unbilledRuns === 1 ? "" : "s"} on the Claude Code
+                subscription — billed against its quota, not per token.
+              </p>
+            )}
+
             {data.byAgent.length === 0 ? (
               <p className="mt-3 text-sm text-muted-foreground">
                 No runs in this period.
@@ -129,7 +141,26 @@ export function CostsCard({ projectId }: { projectId: string }) {
                         {formatCompactNumber(row.outputTokens)}
                       </td>
                       <td className="py-1.5 text-right font-medium tabular-nums">
-                        {formatUsd(row.costUsd)}
+                        {row.unbilledRuns === row.runs ? (
+                          <span
+                            className="font-normal text-muted-foreground"
+                            title="Ran on the worker's Claude Code subscription — billed against its quota, not per token."
+                          >
+                            subscription
+                          </span>
+                        ) : (
+                          <>
+                            {formatUsd(row.costUsd)}
+                            {row.unbilledRuns > 0 && (
+                              <span
+                                className="ml-1 font-normal text-muted-foreground"
+                                title={`${row.unbilledRuns} of these runs used the Claude Code subscription and are not priced here.`}
+                              >
+                                +{row.unbilledRuns} sub
+                              </span>
+                            )}
+                          </>
+                        )}
                       </td>
                     </tr>
                   ))}

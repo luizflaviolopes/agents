@@ -11,6 +11,14 @@ export type CloneStatus = "pending" | "cloning" | "ready" | "error";
 
 export type AgentRole = "manager" | "specialist" | "librarian";
 
+/**
+ * Which credential an agent's Claude Code subprocess authenticates with
+ * (0013). 'api' bills the Anthropic API per token; 'subscription' drops the
+ * API credentials from that subprocess so it falls through to the worker
+ * machine's own Claude Code login, drawing on its quota instead.
+ */
+export type AgentAuthMode = "api" | "subscription";
+
 export type TaskSource =
   | "web"
   | "telegram"
@@ -262,6 +270,12 @@ export interface Agent {
   allowed_tools: string[];
   /** Built-in tool deny-list (0009) — the SDK's `disallowedTools` option. */
   disallowed_tools: string[];
+  /**
+   * Credential this agent's runs authenticate with (0013). Defaults to 'api',
+   * so pre-0013 rows keep billing the API; see
+   * supabase/migrations/0013_agent_auth_mode.sql.
+   */
+  auth_mode: AgentAuthMode;
   is_active: boolean;
   /**
    * High-water mark for the librarian's read_project_activity sweeps (0005);

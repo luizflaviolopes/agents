@@ -39,6 +39,22 @@ interface AgentCosts {
   inputTokens: number;
   outputTokens: number;
   runs: number;
+  /** Of those runs, how many were not billed per token (0013). */
+  unbilledRuns: number;
+}
+
+/**
+ * A run that reported usage but no dollar figure ran on the machine's Claude
+ * Code subscription (auth_mode 'subscription', 0013) — real work against a
+ * quota, which `costUsd` cannot express and would otherwise report as $0.00.
+ *
+ * Read off the run rather than the agent's current auth_mode on purpose: an
+ * agent switched between modes would otherwise relabel every run it ever
+ * made. A run that crashed before its result message has null usage columns
+ * too, hence the token check — that one is missing data, not free work.
+ */
+function isUnbilled(row: CostRunRow): boolean {
+  return row.cost_usd === null && row.input_tokens !== null;
 }
 
 /**
@@ -82,11 +98,13 @@ export const GET = apiHandler(async (request: Request, { params }: Params) => {
     cacheReadTokens: 0,
     cacheCreationTokens: 0,
     runs: 0,
+    unbilledRuns: 0,
   };
   const byAgentMap = new Map<string, AgentCosts>();
 
   for (const row of rows) {
     totals.runs += 1;
+    if (isUnbilled(row)) totals.unbilledRuns += 1;
     totals.costUsd += row.cost_usd ?? 0;
     totals.inputTokens += row.input_tokens ?? 0;
     totals.outputTokens += row.output_tokens ?? 0;
@@ -104,10 +122,12 @@ export const GET = apiHandler(async (request: Request, { params }: Params) => {
         inputTokens: 0,
         outputTokens: 0,
         runs: 0,
+        unbilledRuns: 0,
       };
       byAgentMap.set(key, entry);
     }
     entry.runs += 1;
+    if (isUnbilled(row)) entry.unbilledRuns += 1;
     entry.costUsd += row.cost_usd ?? 0;
     entry.inputTokens += row.input_tokens ?? 0;
     entry.outputTokens += row.output_tokens ?? 0;

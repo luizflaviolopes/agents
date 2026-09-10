@@ -648,6 +648,57 @@ people who are not the project owner.
   deploy before the migration). Fleet MCP tools are not built-ins and stay
   available regardless.
 
+## Agent auth mode (migration 0013)
+
+`agents.auth_mode` picks the credential one agent's runs authenticate with.
+It is not a second way to run agents — the worker has always executed them
+through the Claude Agent SDK, which *is* the Claude Code harness spawned as a
+subprocess on the worker machine. What decides whether a run bills the API is
+only which credential reaches that subprocess.
+
+- **`'api'`** (the column default, so every pre-0013 row is unchanged) leaves
+  `ANTHROPIC_API_KEY` in place and bills per token.
+- **`'subscription'`** removes `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN`
+  from that one subprocess's environment. An API credential outranks a stored
+  OAuth profile in the SDK's resolution order, so the switch has to be a
+  *removal* — leaving the key in place would silently keep billing the API.
+  What is left is whatever Claude Code stored on the worker box:
+  `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`), or the login under
+  `~/.claude`, which survives because `buildAgentEnv` keeps `HOME`.
+
+Why per agent rather than one global switch: the two modes fail differently.
+API billing degrades by costing more. A subscription is metered in rolling
+windows sized for one interactive human, and this fleet is not one — with
+`WORKER_MAX_CONCURRENT_TASKS` runs at a time plus post-run sweeps and the
+daily scheduler, exhausting the quota stalls **every** subscription agent at
+once, mid-task. Bulk work (librarian sweeps, ticket review) belongs on the
+subscription; agents whose latency or reliability you depend on belong on the
+API. Confirm your own use is within Anthropic's subscription terms before
+moving a fleet onto one.
+
+- **Preflight, not discovery.** `describeSubscriptionCredential` /
+  `hasAuthCredential` (`apps/worker/src/lib/agent-env.ts`) check for a login
+  before the run starts. Without the check, a `'subscription'` agent on a
+  machine with no login fails somewhere inside the SDK with an authentication
+  error that never mentions `auth_mode`, and the task lands `'failed'` looking
+  like a model problem. Task runs fail fast with
+  `NO_SUBSCRIPTION_CREDENTIAL_ERROR`; manager and direct-chat threads reply
+  with it. macOS keeps the login in the Keychain rather than on disk, so there
+  it reports the login present and lets the run be the judge.
+- **A failure to authenticate arrives as a `'success'` result.** The SDK
+  reports it with `subtype: 'success'`, the error text *as* the result, and
+  every usage counter at zero — so taken at face value the task lands `'done'`
+  with "Failed to authenticate…" stored as its answer. `reachedModel`
+  (`executor.ts`) treats a success that spent no tokens as a failure instead.
+  Structural rather than a match on the message text, which is the SDK's to
+  change. This is also how an expired subscription login surfaces: the
+  preflight only proves credentials *exist*, not that they still work.
+- **`task_runs.cost_usd` is null for subscription runs.** Token counts are
+  recorded as usual. The SDK still reports a `costUSD` — what those tokens
+  *would* have cost on the API — and writing it would inflate a dashboard the
+  owner reads as money spent, while writing `0` would read as "this run was
+  free" rather than "this run was not billed per token".
+
 ## Fleet MCP endpoint (migration 0012)
 
 The fleet is itself an **MCP server**: `POST /api/mcp`
@@ -693,7 +744,9 @@ account. Guide: [docs/FLEET-MCP-SERVER.md](docs/FLEET-MCP-SERVER.md).
 
 ## Environment
 
-See `.env.example`: Supabase URL/keys, `ANTHROPIC_API_KEY`,
+See `.env.example`: Supabase URL/keys, `ANTHROPIC_API_KEY`
+(with `CLAUDE_CODE_OAUTH_TOKEN` as its counterpart for `auth_mode`
+`'subscription'` agents — see "Agent auth mode"),
 `TELEGRAM_BOT_TOKEN`, `GITHUB_TOKEN`, `WORKSPACES_ROOT`, `WEB_URL`,
 `KNOWLEDGE_SWEEP_AFTER_RUNS`, `KNOWLEDGE_INJECTION`,
 `WORKER_MAX_CONCURRENT_TASKS` (default 5 — each run spawns an SDK subprocess,

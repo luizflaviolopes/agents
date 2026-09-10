@@ -10,11 +10,17 @@ import {
 import {
   DEFAULT_MODEL,
   type Agent,
+  type AgentAuthMode,
   type Task,
   type TaskRun,
   type TaskStatus,
 } from "@agent-fleet/shared";
-import { buildAgentEnv, buildToolLimits } from "../lib/agent-env.js";
+import {
+  buildAgentEnv,
+  buildToolLimits,
+  describeSubscriptionCredential,
+  NO_SUBSCRIPTION_CREDENTIAL_ERROR,
+} from "../lib/agent-env.js";
 import { logger, RunLogWriter } from "../lib/logger.js";
 import { mcpApprovalRule } from "../lib/mcp-approval.js";
 import { buildApprovalHooks } from "./approval-hook.js";
@@ -63,7 +69,11 @@ interface RunUsage {
   output_tokens: number;
   cache_read_tokens: number;
   cache_creation_tokens: number;
-  cost_usd: number;
+  /**
+   * Null for a run that did not bill per token (auth_mode 'subscription',
+   * 0013). Zero would read as "this run was free" in the costs dashboard.
+   */
+  cost_usd: number | null;
 }
 
 /**
@@ -127,10 +137,23 @@ export class TaskExecutor {
     const runState: RunState = { pendingActionsCreated: 0, activityReadThrough: null };
 
     try {
-      // 2. Resolve the working directory.
+      // 2. Fail fast when the agent runs on the machine's Claude Code
+      //    subscription (0013) and this machine has no login to offer —
+      //    inside the SDK the same problem surfaces as an opaque auth error.
+      const authMode = agent.auth_mode ?? "api";
+      const subscriptionCredential =
+        authMode === "subscription" ? describeSubscriptionCredential() : null;
+      if (authMode === "subscription" && !subscriptionCredential) {
+        await runLog.write("error", { message: NO_SUBSCRIPTION_CREDENTIAL_ERROR }, "error");
+        await this.markRun(run.id, "failed", NO_SUBSCRIPTION_CREDENTIAL_ERROR, null);
+        await this.finishTask(task, agent, "failed", NO_SUBSCRIPTION_CREDENTIAL_ERROR);
+        return;
+      }
+
+      // 3. Resolve the working directory.
       const cwd = await this.resolveCwd(task, agent);
 
-      // 3. Build MCP servers: the agent's own + the in-process 'fleet' server
+      // 4. Build MCP servers: the agent's own + the in-process 'fleet' server
       //    (propose_action / ask_agent / notify_user, librarian tools for
       //    librarian agents), attached to every task run. A user server named
       //    'fleet' would be shadowed.
@@ -150,7 +173,7 @@ export class TaskExecutor {
         }),
       };
 
-      // 4. Run the Claude Agent SDK.
+      // 5. Run the Claude Agent SDK.
       const knowledge = await loadKnowledgeBundle(this.supabase, agent);
       const librarian = agent.role === "librarian" ? null : await findLibrarian(this.supabase, task.project_id);
       const systemPrompt = buildSystemPrompt(agent, task, knowledge, librarianForwardingRule(agent, librarian));
@@ -181,7 +204,7 @@ export class TaskExecutor {
         // The worker's secrets stay out of the agent's shell, and the agent's
         // built-in tools are capped by its own config (0009) — neither is
         // negotiable by prompt, which matters under bypassPermissions.
-        env: buildAgentEnv(),
+        env: buildAgentEnv(authMode),
         ...buildToolLimits(agent),
         stderr: (data: string) => {
           const line = data.trim();
@@ -196,13 +219,20 @@ export class TaskExecutor {
         model: options.model,
         cwd,
         mcp_servers: Object.keys(mcpServers),
+        auth_mode: authMode,
+        auth_source: subscriptionCredential ?? "ANTHROPIC_API_KEY",
       });
 
-      // 5. Stream SDK messages into run_logs and capture the final result
+      // 6. Stream SDK messages into run_logs and capture the final result
       //    (plus token/cost usage from the result message, when one arrived).
-      const { resultText, failure, usage } = await this.streamQuery(prompt, options, runLog);
+      const { resultText, failure, usage } = await this.streamQuery(
+        prompt,
+        options,
+        runLog,
+        authMode,
+      );
 
-      // 6. Record the outcome. A run that proposed pending actions lands in
+      // 7. Record the outcome. A run that proposed pending actions lands in
       //    'review' (the user still has to approve/reject the sends).
       if (failure) {
         await this.markRun(run.id, "failed", failure, usage);
@@ -248,6 +278,7 @@ export class TaskExecutor {
     prompt: string,
     options: AgentSdkOptions,
     runLog: RunLogWriter,
+    authMode: AgentAuthMode,
   ): Promise<{ resultText: string | null; failure: string | null; usage: RunUsage | null }> {
     let resultText: string | null = null;
     let failure: string | null = null;
@@ -311,8 +342,19 @@ export class TaskExecutor {
         case "result": {
           sawResult = true;
           // Both result subtypes carry usage/cost data — capture it either way.
-          usage = extractRunUsage(message, options.model ?? DEFAULT_MODEL);
-          if (message.subtype === "success") {
+          usage = extractRunUsage(message, options.model ?? DEFAULT_MODEL, authMode);
+          if (message.subtype === "success" && !reachedModel(usage)) {
+            // A run the model never saw. The SDK reports an authentication
+            // failure this way — subtype 'success', the error text as the
+            // result, no tokens — so taking it at face value would mark the
+            // task done and store "Failed to authenticate…" as its answer.
+            failure = authMode === "subscription"
+              ? `${message.result.trim()} — this agent runs on the machine's Claude Code ` +
+                "subscription; re-authenticate the worker (`claude setup-token`, then set " +
+                "CLAUDE_CODE_OAUTH_TOKEN) or switch it back to 'api'."
+              : `${message.result.trim()} — check the worker's ANTHROPIC_API_KEY.`;
+            await runLog.write("error", { subtype: message.subtype, reached_model: false }, "error");
+          } else if (message.subtype === "success") {
             resultText = message.result;
           } else {
             const errors = message.errors?.length ? message.errors.join("; ") : message.subtype;
@@ -804,7 +846,15 @@ function buildSystemPrompt(
  * models, with `model` set to the costliest entry's key. Falls back to the
  * main-loop `usage` + `total_cost_usd` when `modelUsage` is empty.
  */
-function extractRunUsage(message: SDKResultMessage, fallbackModel: string): RunUsage {
+function extractRunUsage(
+  message: SDKResultMessage,
+  fallbackModel: string,
+  authMode: AgentAuthMode,
+): RunUsage {
+  // A subscription run draws on a quota, not a balance. The SDK still reports
+  // a costUSD — what the same tokens would have cost on the API — and writing
+  // it here would inflate a dashboard the owner reads as money spent.
+  const billsPerToken = authMode !== "subscription";
   const entries = Object.entries(message.modelUsage ?? {});
   if (entries.length > 0) {
     const totals: RunUsage = {
@@ -815,19 +865,22 @@ function extractRunUsage(message: SDKResultMessage, fallbackModel: string): RunU
       cache_creation_tokens: 0,
       cost_usd: 0,
     };
+    let costTotal = 0;
     let topCost = -1;
     for (const [model, modelUsage] of entries) {
       totals.input_tokens += modelUsage.inputTokens ?? 0;
       totals.output_tokens += modelUsage.outputTokens ?? 0;
       totals.cache_read_tokens += modelUsage.cacheReadInputTokens ?? 0;
       totals.cache_creation_tokens += modelUsage.cacheCreationInputTokens ?? 0;
-      totals.cost_usd += modelUsage.costUSD ?? 0;
+      costTotal += modelUsage.costUSD ?? 0;
+      // The costliest entry still names the run's model under either auth
+      // mode — costUSD is reported whether or not it is charged.
       if ((modelUsage.costUSD ?? 0) > topCost) {
         topCost = modelUsage.costUSD ?? 0;
         totals.model = model;
       }
     }
-    totals.cost_usd = roundCost(totals.cost_usd);
+    totals.cost_usd = billsPerToken ? roundCost(costTotal) : null;
     return totals;
   }
 
@@ -838,8 +891,21 @@ function extractRunUsage(message: SDKResultMessage, fallbackModel: string): RunU
     output_tokens: usage?.output_tokens ?? 0,
     cache_read_tokens: usage?.cache_read_input_tokens ?? 0,
     cache_creation_tokens: usage?.cache_creation_input_tokens ?? 0,
-    cost_usd: roundCost(message.total_cost_usd ?? 0),
+    cost_usd: billsPerToken ? roundCost(message.total_cost_usd ?? 0) : null,
   };
+}
+
+/**
+ * Whether the run actually reached the model.
+ *
+ * A result message can say 'success' while nothing ran: the SDK reports a
+ * failure to authenticate as a successful turn whose result text *is* the
+ * error, with every usage counter at zero. Any real turn spends input tokens,
+ * so zero across the board is the structural tell — checked instead of
+ * matching on the message text, which is not ours to depend on.
+ */
+function reachedModel(usage: RunUsage): boolean {
+  return usage.input_tokens > 0 || usage.output_tokens > 0;
 }
 
 /** Round to the cost_usd column's numeric(12,6) precision. */

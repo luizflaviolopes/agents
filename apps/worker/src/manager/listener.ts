@@ -16,7 +16,12 @@ import {
   type Project,
   type Task,
 } from "@agent-fleet/shared";
-import { buildAgentEnv, buildToolLimits } from "../lib/agent-env.js";
+import {
+  buildAgentEnv,
+  buildToolLimits,
+  hasAuthCredential,
+  NO_SUBSCRIPTION_CREDENTIAL_ERROR,
+} from "../lib/agent-env.js";
 import { logger } from "../lib/logger.js";
 import { mcpApprovalRule } from "../lib/mcp-approval.js";
 import { buildApprovalHooks } from "../runner/approval-hook.js";
@@ -193,6 +198,14 @@ export class ManagerListener {
       return;
     }
 
+    // A manager set to 'subscription' (0013) on a machine with no Claude Code
+    // login would fail inside the SDK with an auth error the user cannot act
+    // on; say what is actually wrong instead.
+    if (!hasAuthCredential(managerAgent.auth_mode ?? "api")) {
+      await this.sendReply(message, NO_SUBSCRIPTION_CREDENTIAL_ERROR);
+      return;
+    }
+
     const agents = await this.loadAgents(message.project_id);
     const openTasks = await this.loadOpenTasks(message.project_id);
     const recentMessages = await this.loadRecentMessages(message.project_id);
@@ -218,8 +231,9 @@ export class ManagerListener {
       persistSession: false,
       maxTurns: MANAGER_MAX_TURNS,
       // No built-in tools here, but the subprocess environment is still the
-      // worker's — scrub it like every other agent session.
-      env: buildAgentEnv(),
+      // worker's — scrub it like every other agent session, and honour the
+      // manager's own auth mode (0013).
+      env: buildAgentEnv(managerAgent.auth_mode ?? "api"),
     };
 
     try {
@@ -272,6 +286,11 @@ export class ManagerListener {
         "This agent is not available (it may have been deactivated or removed), so it can't reply. " +
           "Pick another agent or message the manager thread.",
       );
+      return;
+    }
+
+    if (!hasAuthCredential(agent.auth_mode ?? "api")) {
+      await this.sendAgentReply(message, agent.id, agent, NO_SUBSCRIPTION_CREDENTIAL_ERROR);
       return;
     }
 
@@ -328,9 +347,9 @@ export class ManagerListener {
         persistSession: false,
         maxTurns: CHAT_MAX_TURNS,
         // Same guardrails as a task run — a chat session is the same agent
-        // with the same tools, so it gets the same scrubbed environment and
-        // the same built-in tool limits (0009).
-        env: buildAgentEnv(),
+        // with the same tools, so it gets the same scrubbed environment, the
+        // same built-in tool limits (0009) and the same auth mode (0013).
+        env: buildAgentEnv(agent.auth_mode ?? "api"),
         ...buildToolLimits(agent),
         stderr: (data: string) => {
           const line = data.trim();

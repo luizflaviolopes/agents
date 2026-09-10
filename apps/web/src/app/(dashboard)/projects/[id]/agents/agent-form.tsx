@@ -4,11 +4,16 @@ import * as React from "react";
 import { Plus, Trash2, X } from "lucide-react";
 import type {
   Agent,
+  AgentAuthMode,
   McpApprovalPolicy,
   McpServerConfig,
   McpServerType,
 } from "@agent-fleet/shared";
-import { DEFAULT_MODEL, MCP_INTEGRATION_TYPES } from "@agent-fleet/shared";
+import {
+  DEFAULT_AGENT_AUTH_MODE,
+  DEFAULT_MODEL,
+  MCP_INTEGRATION_TYPES,
+} from "@agent-fleet/shared";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -68,6 +73,8 @@ export interface AgentFormValue {
   /** Built-in tool limits (0009); empty = unrestricted. */
   allowedTools: string[];
   disallowedTools: string[];
+  /** Credential this agent's runs authenticate with (0013). */
+  authMode: AgentAuthMode;
 }
 
 /** "Bash, Write" ⇄ ["Bash", "Write"] for the tool-limit inputs. */
@@ -89,6 +96,7 @@ export function emptyAgentForm(): AgentFormValue {
     mcpServers: [],
     allowedTools: [],
     disallowedTools: [],
+    authMode: DEFAULT_AGENT_AUTH_MODE,
   };
 }
 
@@ -103,6 +111,7 @@ export function agentToForm(agent: Agent): AgentFormValue {
     mcpServers: (agent.mcp_servers ?? []).map(mcpConfigToRow),
     allowedTools: [...(agent.allowed_tools ?? [])],
     disallowedTools: [...(agent.disallowed_tools ?? [])],
+    authMode: agent.auth_mode ?? DEFAULT_AGENT_AUTH_MODE,
   };
 }
 
@@ -251,6 +260,28 @@ export function AgentForm({
             )}
           </Select>
         </div>
+      </div>
+
+      {/* Auth mode (0013) */}
+      <div className="space-y-2">
+        <Label htmlFor="agent-auth-mode">Billing</Label>
+        <Select
+          id="agent-auth-mode"
+          value={value.authMode}
+          onChange={(e) => set("authMode", e.target.value as AgentAuthMode)}
+        >
+          <option value="api">Anthropic API — billed per token</option>
+          <option value="subscription">
+            Claude Code subscription — billed against the worker&apos;s quota
+          </option>
+        </Select>
+        <p className="text-xs text-muted-foreground">
+          Both modes run the same Claude Code harness on the worker machine; only the credential
+          differs. <strong>Subscription</strong> costs nothing per token, but every subscription
+          agent shares one quota — when it runs out they all stall at once, mid-task — and their
+          runs record no dollar cost on the Costs page. Good for bulk work (sweeps, reviews); keep
+          agents you depend on responding promptly on the API.
+        </p>
       </div>
 
       <div className="space-y-2">

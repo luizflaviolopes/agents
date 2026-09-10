@@ -1,4 +1,5 @@
 import type {
+  AgentAuthMode,
   AgentRole,
   IntegrationType,
   McpApprovalPolicy,
@@ -28,6 +29,19 @@ export const AGENT_ROLES = [
   "specialist",
   "librarian",
 ] as const satisfies readonly AgentRole[];
+
+/** All agent auth modes (0013). */
+export const AGENT_AUTH_MODES = [
+  "api",
+  "subscription",
+] as const satisfies readonly AgentAuthMode[];
+
+/**
+ * Auth mode for new agents. 'api' matches the pre-0013 behaviour and the
+ * column default, so an agent created before the worker box has a Claude Code
+ * login still runs.
+ */
+export const DEFAULT_AGENT_AUTH_MODE: AgentAuthMode = "api";
 
 /** All schedule kinds. */
 export const SCHEDULE_KINDS = [

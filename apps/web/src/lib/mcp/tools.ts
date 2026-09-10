@@ -1,7 +1,7 @@
 import "server-only";
 import { z } from "zod";
 import type { Agent, McpServerConfig } from "@agent-fleet/shared";
-import { mcpServerSchema } from "@agent-fleet/shared";
+import { AGENT_AUTH_MODES, mcpServerSchema } from "@agent-fleet/shared";
 import { ApiResponseError, requireProjectAccess } from "@/lib/api/auth";
 import {
   createAgent,
@@ -140,6 +140,7 @@ const agentConfigShape = {
   mcp_servers: z.array(mcpServerSchema),
   allowed_tools: z.array(z.string()),
   disallowed_tools: z.array(z.string()),
+  auth_mode: z.enum(AGENT_AUTH_MODES),
 };
 
 const createAgentArgs = z
@@ -240,6 +241,16 @@ const agentConfigJsonSchema = {
     type: "array",
     items: { type: "string" },
     description: "Built-in tool deny-list, applied on top of allowed_tools.",
+  },
+  auth_mode: {
+    type: "string",
+    enum: [...AGENT_AUTH_MODES],
+    description:
+      "Which credential this agent's runs authenticate with. 'api' bills the " +
+      "Anthropic API per token. 'subscription' runs on the worker machine's own " +
+      "Claude Code login instead, drawing on its quota — cheaper for bulk work, " +
+      "but the quota is shared with every other subscription agent and stalls them " +
+      "all when it runs out, and such runs record no cost_usd.",
   },
 } as const;
 
@@ -353,6 +364,7 @@ export const FLEET_TOOLS: McpTool<McpToolContext>[] = [
           : undefined,
         allowedTools: input.allowed_tools,
         disallowedTools: input.disallowed_tools,
+        authMode: input.auth_mode,
       });
       return { agent: serializeAgent(agent) };
     },
@@ -397,6 +409,7 @@ export const FLEET_TOOLS: McpTool<McpToolContext>[] = [
         mcpServers,
         allowedTools: input.allowed_tools,
         disallowedTools: input.disallowed_tools,
+        authMode: input.auth_mode,
         isActive: input.is_active,
       });
       return { agent: serializeAgent(agent) };

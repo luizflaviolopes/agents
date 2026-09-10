@@ -1,5 +1,10 @@
 import "server-only";
-import type { Agent, AgentRole, McpServerConfig } from "@agent-fleet/shared";
+import type {
+  Agent,
+  AgentAuthMode,
+  AgentRole,
+  McpServerConfig,
+} from "@agent-fleet/shared";
 import {
   ApiResponseError,
   requireAgentAccess,
@@ -39,6 +44,8 @@ export interface AgentConfigInput {
   mcpServers?: McpServerConfig[];
   allowedTools?: string[];
   disallowedTools?: string[];
+  /** Credential the agent's runs authenticate with (0013). */
+  authMode?: AgentAuthMode;
   isActive?: boolean;
 }
 
@@ -133,6 +140,9 @@ export async function createAgent(
       mcp_servers: input.mcpServers ?? [],
       allowed_tools: input.allowedTools ?? [],
       disallowed_tools: input.disallowedTools ?? [],
+      // Omitted rather than defaulted here: the column default ('api') is the
+      // single source of truth for what a new agent bills.
+      ...(input.authMode !== undefined ? { auth_mode: input.authMode } : {}),
     })
     .select()
     .single();
@@ -175,6 +185,7 @@ export async function updateAgent(
   if (input.disallowedTools !== undefined) {
     patch.disallowed_tools = input.disallowedTools;
   }
+  if (input.authMode !== undefined) patch.auth_mode = input.authMode;
   if (input.isActive !== undefined) patch.is_active = input.isActive;
   if (Object.keys(patch).length === 0) {
     throw new ApiResponseError(400, "Nothing to update");

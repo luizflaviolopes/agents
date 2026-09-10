@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { mcpServerSchema } from "@agent-fleet/shared";
+import { AGENT_AUTH_MODES, mcpServerSchema } from "@agent-fleet/shared";
 import { apiHandler, parseBody, requireUser } from "@/lib/api/auth";
 import { deleteAgent, updateAgent } from "@/lib/agents/service";
 
@@ -20,6 +20,8 @@ const updateAgentSchema = z.object({
   mcpServers: z.array(mcpServerSchema).optional(),
   allowedTools: z.array(z.string()).optional(),
   disallowedTools: z.array(z.string()).optional(),
+  /** Credential the agent's runs authenticate with (0013). */
+  authMode: z.enum(AGENT_AUTH_MODES).optional(),
   isActive: z.boolean().optional(),
 });
 

@@ -345,6 +345,7 @@ function CreateAgentDialog({
         // The builder does not propose tool limits — set them deliberately.
         allowedTools: [],
         disallowedTools: [],
+        authMode: emptyAgentForm().authMode,
       });
       setBuilderNote(p.reasoning ?? null);
       setNeedsWorkspace(Boolean(p.needsWorkspace));
@@ -379,6 +380,7 @@ function CreateAgentDialog({
             plugins: form.plugins,
             allowedTools: form.allowedTools,
             disallowedTools: form.disallowedTools,
+            authMode: form.authMode,
             mcpServers: form.mcpServers
               .filter((row) => row.name.trim())
               .map(rowToMcpConfig),
@@ -585,6 +587,7 @@ function EditAgentDialog({
             plugins: form.plugins,
             allowedTools: form.allowedTools,
             disallowedTools: form.disallowedTools,
+            authMode: form.authMode,
             mcpServers: form.mcpServers
               .filter((row) => row.name.trim())
               .map(rowToMcpConfig),

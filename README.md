@@ -152,6 +152,8 @@ Apply **all** migrations in `supabase/migrations/`, in filename order:
   message is handled once.
 - `0012_api_tokens.sql` — personal access tokens, which authenticate the
   fleet's own MCP endpoint (`/api/mcp`).
+- `0013_agent_auth_mode.sql` — per-agent choice between billing the Anthropic
+  API and running on the worker machine's own Claude Code subscription.
 
 **Option A — Supabase CLI (recommended):**
 
@@ -163,7 +165,7 @@ npx supabase db push
 
 **Option B — SQL editor:** open your project's *SQL Editor* in the Supabase
 dashboard and run each migration file's contents, one at a time, in
-filename order (`0001` → `0012`).
+filename order (`0001` → `0013`).
 
 ### 3. Get your Supabase keys
 
