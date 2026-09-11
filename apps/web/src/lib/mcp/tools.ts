@@ -212,6 +212,17 @@ const mcpServerJsonSchema = {
         "credential variable names must still match the definition in " +
         "packages/shared/src/connectors.ts.",
     },
+    capabilities: {
+      type: "array",
+      items: { type: "string" },
+      description:
+        "Connector blocks to lift for this agent, by capability key (e.g. " +
+        "'post' on the slack connector lets it send messages without the " +
+        "approval gate). Omitted means every blocked tool stays blocked. " +
+        "Keys and what each costs are in packages/shared/src/connectors.ts; " +
+        "a capability that needs a server setting brings its own, so setting " +
+        "the key is enough.",
+    },
   },
 } as const;
 

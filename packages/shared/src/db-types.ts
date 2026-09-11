@@ -160,6 +160,15 @@ export interface McpServerConfig {
    * deploy degrades to a plain hand-configured server instead of failing.
    */
   connector?: ConnectorId;
+  /**
+   * Connector capability keys the owner switched on for this agent — blocks
+   * from the catalog they chose to lift (e.g. letting a Slack agent post).
+   *
+   * Absent or empty means every `blockedTools` entry applies, which is the
+   * default and the state of every entry written before capabilities
+   * existed. See `ConnectorCapability`.
+   */
+  capabilities?: string[];
 }
 
 /** Payload for pending_actions of type 'slack_reply' | 'slack_message'. */

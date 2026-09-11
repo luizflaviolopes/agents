@@ -351,12 +351,22 @@ nobody approved):
   the agent's OWN server names (a renamed server still resolves), and
   `buildToolLimits` (`apps/worker/src/lib/agent-env.ts`) merges them into the
   SDK's `disallowedTools` at run time.
+- `capabilities` — blocks the owner may lift, per agent. A
+  `ConnectorCapability` is a decision in the owner's words ("post messages
+  directly"), not a tool name: it names the tools it un-blocks, the risk it
+  carries, and any server setting those tools need to exist at all — Slack
+  hides its writers behind `SLACK_MCP_ADD_MESSAGE_TOOL` and friends, so
+  lifting the deny entry alone would silently do nothing. The enabled keys
+  live on the agent's server entry (`mcp_servers[].capabilities`);
+  `connectorDeniedTools()` subtracts them at run time. Absent means all
+  blocked, which is what every entry written before this said.
 
-Run time, not save time, and deliberately: the block is then not editable in
-the agent's tool-limits box, and a tool the catalog blocks tomorrow is
-blocked on the next run of an agent configured today. This is a capability
-limit like 0009's, not an instruction — the distinction that matters for
-agents whose entire input is untrusted text, which is every comms agent.
+Run time, not save time, and deliberately: a tool the catalog blocks tomorrow
+is blocked on the next run of an agent configured today, and lifting one is a
+switch with its cost written next to it rather than a tool name quietly typed
+into the tool-limits box. This is a capability limit like 0009's, not an
+instruction — the distinction that matters for agents whose entire input is
+untrusted text, which is every comms agent.
 
 What a connector is NOT is the credential an outbound action is sent with.
 That stays in the project integration, where only the deterministic executor

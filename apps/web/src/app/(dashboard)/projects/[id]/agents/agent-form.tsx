@@ -16,6 +16,7 @@ import {
   CONNECTORS,
   DEFAULT_AGENT_AUTH_MODE,
   DEFAULT_MODEL,
+  enabledCapabilities,
   getConnector,
   MCP_INTEGRATION_TYPES,
   readConnectorCredentials,
@@ -30,6 +31,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select } from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import type { Workspace } from "@agent-fleet/shared";
 
@@ -61,6 +63,8 @@ export interface McpServerRow {
    * the catalog says, and `rowToMcpConfig` does the mapping on the way out.
    */
   credentials: Record<string, string>;
+  /** Connector capability keys switched on for this agent; empty = all blocked. */
+  capabilities: string[];
 }
 
 /** A fresh, ungated server row — the shape "Custom server" starts from. */
@@ -78,6 +82,7 @@ export function emptyMcpServerRow(): McpServerRow {
     integration: "",
     connector: "",
     credentials: {},
+    capabilities: [],
   };
 }
 
@@ -159,6 +164,9 @@ export function mcpConfigToRow(config: McpServerConfig): McpServerRow {
   return {
     connector: def?.id ?? "",
     credentials: def ? readConnectorCredentials(def, config) : {},
+    capabilities: def
+      ? enabledCapabilities(def, config.capabilities).map((c) => c.key)
+      : [],
     name: config.name,
     type: config.type,
     command: config.command ?? "",
@@ -221,7 +229,7 @@ function manualMcpConfig(row: McpServerRow): McpServerConfig {
 export function rowToMcpConfig(row: McpServerRow): McpServerConfig {
   const def = getConnector(row.connector);
   const config = def
-    ? buildConnectorServer(def, row.name, row.credentials)
+    ? buildConnectorServer(def, row.name, row.credentials, row.capabilities)
     : manualMcpConfig(row);
   // Approval settings (0010). 'never' and an empty tool list are the absent
   // state, so an ungated server serialises exactly as it did before 0010.
@@ -754,6 +762,33 @@ function ConnectorFields({
         </div>
       ))}
 
+      {def.capabilities && def.capabilities.length > 0 && (
+        <div className="space-y-2 rounded-md border border-border bg-muted/40 p-2.5">
+          <p className="text-xs font-medium">Let this agent act, not just read</p>
+          {def.capabilities.map((capability) => {
+            const on = server.capabilities.includes(capability.key);
+            return (
+              <div key={capability.key} className="flex items-start gap-2.5">
+                <Switch
+                  checked={on}
+                  onCheckedChange={(checked) =>
+                    onChange({
+                      capabilities: checked
+                        ? [...server.capabilities, capability.key]
+                        : server.capabilities.filter((k) => k !== capability.key),
+                    })
+                  }
+                />
+                <div className="min-w-0">
+                  <p className="text-xs font-medium">{capability.label}</p>
+                  <p className="text-xs text-muted-foreground">{capability.risk}</p>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
       <p className="flex gap-1.5 text-xs text-muted-foreground">
         <ShieldCheck className="mt-0.5 size-3.5 shrink-0" />
         <span>
@@ -761,7 +796,8 @@ function ConnectorFields({
             Blocked for this agent:
           </strong>{" "}
           {def.blockedToolsNote} Enforced by the runtime, not by instructions —
-          the agent never sees these tools.
+          the agent never sees these tools, apart from anything switched on
+          above.
           {def.integration && (
             <>
               {" "}

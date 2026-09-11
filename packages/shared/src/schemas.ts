@@ -67,6 +67,12 @@ export const mcpServerSchema = z.object({
    * — see McpServerConfig.connector.
    */
   connector: z.enum(CONNECTOR_IDS).optional(),
+  /**
+   * Connector blocks this agent lifts, by capability key. Not enumerated
+   * here: the keys are per-connector, and an unknown one is ignored at run
+   * time rather than rejected — see McpServerConfig.capabilities.
+   */
+  capabilities: z.array(z.string().min(1).max(100)).max(50).optional(),
 });
 export type McpServerInput = z.infer<typeof mcpServerSchema>;
 

@@ -121,9 +121,28 @@ Picking the connector also does something the JSON below cannot: the worker
 denies this server's write tools — `conversations_add_message`,
 `reactions_add`, `reactions_remove`, `conversations_mark`, and the user-group
 and saved-item writers — at run time, on every run, computed from the catalog
-rather than stored on the agent. So the block cannot be edited away in the
-tool-limits box, and a tool the catalog blocks next month is blocked for an
-agent configured today.
+rather than stored on the agent. A tool the catalog blocks next month is
+blocked for an agent configured today.
+
+**That is the default, not the law.** Three of those blocks are switches on
+the connector, under *Let this agent act, not just read*:
+
+| Switch | What it turns on | What it costs |
+|---|---|---|
+| Post messages directly | `conversations_add_message` | The agent posts as you with no approval gate. Its instructions still forbid posting — change them too, or it won't use it. |
+| Add and remove reactions | `reactions_add`, `reactions_remove` | A 👍 is public, attributed to you, and never approved. |
+| Mark conversations read | `conversations_mark` | The agent decides which messages you have already seen. |
+
+Each switch flips **two** things at once: the run-time deny entry, and the
+server variable that makes the tool exist at all
+(`SLACK_MCP_ADD_MESSAGE_TOOL` and friends). That pairing is the reason to use
+the switch rather than hand-editing — either half alone silently does nothing.
+
+A useful middle setting: turn **Post messages directly** on, then set the
+server's approval policy to **ask** for `conversations_add_message`. The agent
+posts through its own Slack tool instead of `propose_action`, and each post
+still waits for you. Between "drafts for approval" and "posts unattended",
+that is the one worth reaching for first.
 
 For reference, the equivalent hand-written `mcp_servers` entry is:
 
@@ -594,7 +613,7 @@ agent from the task board), then paste the output into the Knowledge editor.
 
 | | Allowed freely | Requires my approval | Never |
 |---|---|---|---|
-| **Slack agent** | read channels/DMs/threads, unreads, search, resolve users | any outbound message (`slack_reply`, `slack_message`) | posting, reacting, and marking read via MCP (denied at run time by the connector, disabled server-side, and forbidden by instructions) |
+| **Slack agent** | read channels/DMs/threads, unreads, search, resolve users | any outbound message (`slack_reply`, `slack_message`) | posting, reacting and marking read via MCP — *unless* you switch them on per agent on the connector (see Slack setup step 2) |
 | **Gmail agent** | read, search, label, archive, create labels | any outbound email (`gmail_reply`, `gmail_send`) | deleting mail, sending via MCP (forbidden by instructions; `gmail.modify` scope blocks permanent deletion) |
 
 **Where credentials live:**

@@ -43,6 +43,36 @@ export interface ConnectorFieldDef {
   help?: string;
 }
 
+/**
+ * A blocked capability the owner may deliberately switch on, per agent.
+ *
+ * `blockedTools` is the catalog's default answer, which is "no". This is the
+ * override, and it is expressed as a capability rather than a tool name
+ * because that is the decision the owner is actually making: "let this agent
+ * post in Slack", not "un-deny mcp__slack__conversations_add_message". One
+ * capability can cover several tools (adding and removing a reaction is one
+ * decision) and can carry the server settings that make them exist at all.
+ *
+ * Off by default, always: a capability absent from an agent's
+ * `mcp_servers[].capabilities` is blocked exactly as before.
+ */
+export interface ConnectorCapability {
+  /** Stored on the agent's server entry; stable across label changes. */
+  key: string;
+  /** The decision, in the owner's words. */
+  label: string;
+  /** What it costs. Shown next to the switch — say the quiet part. */
+  risk: string;
+  /** Tools this lifts out of `blockedTools`. */
+  tools: string[];
+  /**
+   * Extra stdio env the server needs before it will expose those tools at
+   * all. Merged only while the capability is on, so turning it off removes
+   * the setting rather than leaving a live switch behind a dead deny entry.
+   */
+  env?: Record<string, string>;
+}
+
 export interface ConnectorDefinition {
   id: ConnectorId;
   label: string;
@@ -88,6 +118,12 @@ export interface ConnectorDefinition {
   blockedTools: string[];
   /** Why those tools are blocked. Shown next to the list in the UI. */
   blockedToolsNote: string;
+  /**
+   * Blocks the owner may lift per agent. Anything not listed here stays
+   * blocked with no way to turn it on short of editing this file — which is
+   * the right amount of friction for, say, a mailbox forwarding rule.
+   */
+  capabilities?: ConnectorCapability[];
   /**
    * Project integration that carries this service's send credential, when
    * outbound actions go through the approval gate. Informational here — it
@@ -211,11 +247,21 @@ const GMAIL: ConnectorDefinition = {
  * each behind its own opt-in variable (`SLACK_MCP_ADD_MESSAGE_TOOL` and
  * friends), and the connector sets none of them. Blocking the tools by name
  * as well is the second lock — the first one is a default in someone else's
- * package, and defaults change. Posting is blocked because the approval gate
- * is the only outbound path. Reactions are blocked because a 👍 is a reply:
- * it is visible to everyone in the channel and it was never approved.
- * `conversations_mark` is blocked because an agent that marks the owner's
- * Slack read decides for them which messages they never see.
+ * package, and defaults change.
+ *
+ * Blocked is the DEFAULT, not the law. Posting, reacting and marking read are
+ * offered as capabilities the owner can switch on per agent: an agent that
+ * handles a channel end to end is a reasonable thing to want, and the fleet
+ * should not make the owner fork the catalog to get it. Each switch flips two
+ * things together — the deny entry and the server variable that makes the
+ * tool exist — because either alone is a setting that silently does nothing.
+ *
+ * What the switches cost, and why they start off: a posted message and a 👍
+ * are both replies, visible to everyone in the channel, sent as the owner,
+ * and neither passed the approval gate. `conversations_mark` means the agent
+ * decides which messages the owner never sees. Worth having on purpose;
+ * nothing you want arriving by default on an agent that reads whatever
+ * anyone types into a channel.
  */
 const SLACK: ConnectorDefinition = {
   id: "slack",
@@ -259,6 +305,32 @@ const SLACK: ConnectorDefinition = {
   ],
   blockedToolsNote:
     "Posting messages, adding or removing reactions, marking conversations read, and editing user groups or saved items. Reading channels, DMs, threads, unreads and search stay available.",
+  capabilities: [
+    {
+      key: "post",
+      label: "Post messages directly",
+      risk: "The agent posts as you without the approval gate. Update its instructions too — the comms template forbids posting. To keep a human in the loop, leave this on but set the approval policy below to ask for conversations_add_message.",
+      tools: ["conversations_add_message"],
+      // "true" is every channel. The server also accepts a comma-separated
+      // channel allowlist here, which is the narrower setting if this agent
+      // only ever answers in one place.
+      env: { SLACK_MCP_ADD_MESSAGE_TOOL: "true" },
+    },
+    {
+      key: "react",
+      label: "Add and remove reactions",
+      risk: "A reaction is public and attributed to you. Cheaper than a message, and it is still a reply nobody approved.",
+      tools: ["reactions_add", "reactions_remove"],
+      env: { SLACK_MCP_REACTION_TOOL: "true" },
+    },
+    {
+      key: "mark",
+      label: "Mark conversations read",
+      risk: "The agent decides what you have already seen. Useful for a triage agent you trust; it can also hide a message from you for good.",
+      tools: ["conversations_mark"],
+      env: { SLACK_MCP_MARK_TOOL: "true" },
+    },
+  ],
   integration: "slack",
   docsPath: "docs/COMMS-AGENTS.md",
 };
@@ -291,18 +363,24 @@ export function buildConnectorServer(
   def: ConnectorDefinition,
   serverName: string,
   credentials: Record<string, string>,
+  capabilities: string[] = [],
 ): McpServerConfig {
   const values: Record<string, string> = {};
   for (const field of def.fields) {
     const value = (credentials[field.key] ?? "").trim();
     if (value) values[def.target[field.key] ?? field.key] = value;
   }
+  // Keys this definition actually offers, in catalog order. A key the
+  // catalog has since dropped is discarded rather than stored forever.
+  const enabled = enabledCapabilities(def, capabilities);
   const base = {
     name: serverName.trim() || def.defaultServerName,
     connector: def.id,
+    ...(enabled.length > 0 ? { capabilities: enabled.map((c) => c.key) } : {}),
   };
   if (def.transport.type === "stdio") {
-    const env = { ...def.transport.env, ...values };
+    const capabilityEnv = Object.assign({}, ...enabled.map((c) => c.env ?? {}));
+    const env = { ...def.transport.env, ...capabilityEnv, ...values };
     return {
       ...base,
       type: "stdio",
@@ -317,6 +395,23 @@ export function buildConnectorServer(
     url: def.transport.url,
     ...(Object.keys(values).length > 0 ? { headers: values } : {}),
   };
+}
+
+/**
+ * The capabilities `def` offers that `keys` switches on, in catalog order.
+ *
+ * Unknown keys drop out rather than throwing, for the same reason unknown
+ * connector ids do: a config written by a newer deploy must not take down an
+ * older worker, and the safe direction for a key this build cannot interpret
+ * is to leave the tool blocked.
+ */
+export function enabledCapabilities(
+  def: ConnectorDefinition,
+  keys: string[] | null | undefined,
+): ConnectorCapability[] {
+  if (!keys?.length) return [];
+  const wanted = new Set(keys);
+  return (def.capabilities ?? []).filter((capability) => wanted.has(capability.key));
 }
 
 /** Field-keyed credentials read back out of a stored connector entry. */
@@ -339,13 +434,23 @@ export function readConnectorCredentials(
  * and so an entry whose `connector` this build does not recognise contributes
  * nothing rather than throwing — a config written by a newer deploy must not
  * take down an older worker mid-rollout.
+ *
+ * Capabilities the owner switched on are subtracted here, at run time, from
+ * the catalog's list — the deny list is never stored, so an agent configured
+ * today still picks up whatever the catalog blocks tomorrow, minus exactly
+ * the switches its owner threw.
  */
 export function connectorDeniedTools(configs: McpServerConfig[] | null | undefined): string[] {
   const denied: string[] = [];
   for (const config of configs ?? []) {
     const def = getConnector(config?.connector);
     if (!def || !config.name) continue;
-    for (const tool of def.blockedTools) denied.push(sdkToolName(config.name, tool));
+    const allowed = new Set(
+      enabledCapabilities(def, config.capabilities).flatMap((c) => c.tools),
+    );
+    for (const tool of def.blockedTools) {
+      if (!allowed.has(tool)) denied.push(sdkToolName(config.name, tool));
+    }
   }
   return denied;
 }
