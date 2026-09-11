@@ -19,7 +19,7 @@ import {
 import {
   buildAgentEnv,
   buildToolLimits,
-  hasAuthCredential,
+  loadSubscriptionCredential,
   NO_SUBSCRIPTION_CREDENTIAL_ERROR,
 } from "../lib/agent-env.js";
 import { logger } from "../lib/logger.js";
@@ -198,10 +198,16 @@ export class ManagerListener {
       return;
     }
 
-    // A manager set to 'subscription' (0013) on a machine with no Claude Code
-    // login would fail inside the SDK with an auth error the user cannot act
-    // on; say what is actually wrong instead.
-    if (!hasAuthCredential(managerAgent.auth_mode ?? "api")) {
+    // A manager set to 'subscription' (0013) with no Claude Code credential to
+    // reach — neither the owner's saved token (0014) nor a login on the worker
+    // — would fail inside the SDK with an auth error the user cannot act on;
+    // say what is actually wrong instead.
+    const managerCredential = await loadSubscriptionCredential(
+      this.supabase,
+      managerAgent.auth_mode ?? "api",
+      message.project_id,
+    );
+    if (!managerCredential) {
       await this.sendReply(message, NO_SUBSCRIPTION_CREDENTIAL_ERROR);
       return;
     }
@@ -233,7 +239,7 @@ export class ManagerListener {
       // No built-in tools here, but the subprocess environment is still the
       // worker's — scrub it like every other agent session, and honour the
       // manager's own auth mode (0013).
-      env: buildAgentEnv(managerAgent.auth_mode ?? "api"),
+      env: buildAgentEnv(managerAgent.auth_mode ?? "api", managerCredential),
     };
 
     try {
@@ -289,7 +295,12 @@ export class ManagerListener {
       return;
     }
 
-    if (!hasAuthCredential(agent.auth_mode ?? "api")) {
+    const credential = await loadSubscriptionCredential(
+      this.supabase,
+      agent.auth_mode ?? "api",
+      message.project_id,
+    );
+    if (!credential) {
       await this.sendAgentReply(message, agent.id, agent, NO_SUBSCRIPTION_CREDENTIAL_ERROR);
       return;
     }
@@ -349,7 +360,7 @@ export class ManagerListener {
         // Same guardrails as a task run — a chat session is the same agent
         // with the same tools, so it gets the same scrubbed environment, the
         // same built-in tool limits (0009) and the same auth mode (0013).
-        env: buildAgentEnv(agent.auth_mode ?? "api"),
+        env: buildAgentEnv(agent.auth_mode ?? "api", credential),
         ...buildToolLimits(agent),
         stderr: (data: string) => {
           const line = data.trim();

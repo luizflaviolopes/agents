@@ -1,8 +1,10 @@
 import type { Metadata } from "next";
 import { redirect } from "next/navigation";
-import type { ApiTokenSummary, Profile } from "@agent-fleet/shared";
+import type { ApiTokenSummary, ProfileSummary } from "@agent-fleet/shared";
 import { getSessionUser } from "@/lib/api/page-data";
+import { claudeTokenStatus, PROFILE_SUMMARY_COLUMNS } from "@/lib/api/profile";
 import { getAdminClient } from "@/lib/supabase/admin";
+import { ClaudeSubscriptionCard } from "./claude-subscription-card";
 import { McpAccessCard } from "./mcp-access-card";
 import { SettingsForm } from "./settings-form";
 
@@ -13,9 +15,12 @@ export default async function SettingsPage() {
   if (!user) redirect("/login");
 
   const admin = getAdminClient();
+  // Same rule as the token hash below: the profile's Claude Code token (0014)
+  // is not selected, so it cannot reach the browser by accident. The hint and
+  // the timestamp beside it are what this page actually shows.
   const { data: profile } = await admin
     .from("profiles")
-    .select("*")
+    .select(PROFILE_SUMMARY_COLUMNS)
     .eq("id", user.id)
     .maybeSingle();
 
@@ -38,7 +43,10 @@ export default async function SettingsPage() {
       <div className="mt-6 space-y-6">
         <SettingsForm
           email={user.email ?? ""}
-          initialProfile={profile as Profile | null}
+          initialProfile={profile as ProfileSummary | null}
+        />
+        <ClaudeSubscriptionCard
+          initialStatus={claudeTokenStatus(profile as ProfileSummary | null)}
         />
         <McpAccessCard
           initialTokens={(tokens ?? []) as ApiTokenSummary[]}

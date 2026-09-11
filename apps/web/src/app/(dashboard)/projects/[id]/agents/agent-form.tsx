@@ -356,10 +356,11 @@ export function AgentForm({
         </Select>
         <p className="text-xs text-muted-foreground">
           Both modes run the same Claude Code harness on the worker machine; only the credential
-          differs. <strong>Subscription</strong> costs nothing per token, but every subscription
-          agent shares one quota — when it runs out they all stall at once, mid-task — and their
-          runs record no dollar cost on the Costs page. Good for bulk work (sweeps, reviews); keep
-          agents you depend on responding promptly on the API.
+          differs — <strong>subscription</strong> agents use the token saved under Settings →
+          Claude Code subscription. It costs nothing per token, but every subscription agent shares
+          one quota — when it runs out they all stall at once, mid-task — and their runs record no
+          dollar cost on the Costs page. Good for bulk work (sweeps, reviews); keep agents you
+          depend on responding promptly on the API.
         </p>
       </div>
 

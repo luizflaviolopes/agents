@@ -215,7 +215,34 @@ export interface Profile {
   display_name: string | null;
   telegram_chat_id: string | null;
   telegram_link_code: string | null;
+  /**
+   * The owner's Claude Code subscription token (0014), replayed into the
+   * subprocess of their agents with auth_mode 'subscription'. Plaintext,
+   * because the worker has to present it — see the migration.
+   *
+   * Server-side only: never select this into anything the browser receives.
+   * `ProfileSummary` is the shape every response uses.
+   */
+  claude_code_oauth_token: string | null;
+  claude_code_token_hint: string | null;
+  claude_code_token_set_at: string | null; // timestamptz
   created_at: string; // timestamptz
+}
+
+/**
+ * A profile without the subscription token: what an API response or a server
+ * component may hand to the browser. The omission is enforced at the query —
+ * reads select an explicit column list rather than `*` — and this type is what
+ * makes a mistake there a compile error downstream.
+ */
+export type ProfileSummary = Omit<Profile, "claude_code_oauth_token">;
+
+/** What Settings shows about the saved token: enough to identify it, not to use it. */
+export interface ClaudeTokenStatus {
+  /** Leading/trailing characters of the token, or null when none is saved. */
+  hint: string | null;
+  /** When it was last replaced. */
+  setAt: string | null;
 }
 
 /**

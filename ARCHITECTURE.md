@@ -16,7 +16,9 @@ unions live in `packages/shared/src/db-types.ts`. Keep both in sync.
 
 - **profiles** — one per auth user (auto-created by trigger on
   `auth.users` insert). Holds `telegram_chat_id` / `telegram_link_code` for
-  linking a Telegram account.
+  linking a Telegram account, and (0014) `claude_code_oauth_token` plus its
+  hint/timestamp — the Claude Code credential this owner's `'subscription'`
+  agents run on. The token column is server-side only; see "Agent auth mode".
 - **projects** — owned by a user (`owner_id`). The unit of access control.
 - **workspaces** — belong to a project. `path` is a slugified folder name on
   the worker's disk. Unique `(project_id, name)`.
@@ -728,10 +730,8 @@ only which credential reaches that subprocess.
   from that one subprocess's environment. An API credential outranks a stored
   OAuth profile in the SDK's resolution order, so the switch has to be a
   *removal* — leaving the key in place would silently keep billing the API.
-  What is left is whatever Claude Code stored on the worker box:
-  `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`), or the login under
-  `~/.claude`, which survives because `buildAgentEnv` keeps `HOME`.
-
+  What authenticates the run instead is resolved by
+  `loadSubscriptionCredential` (0014, below).
 Why per agent rather than one global switch: the two modes fail differently.
 API billing degrades by costing more. A subscription is metered in rolling
 windows sized for one interactive human, and this fleet is not one — with
@@ -742,10 +742,10 @@ subscription; agents whose latency or reliability you depend on belong on the
 API. Confirm your own use is within Anthropic's subscription terms before
 moving a fleet onto one.
 
-- **Preflight, not discovery.** `describeSubscriptionCredential` /
-  `hasAuthCredential` (`apps/worker/src/lib/agent-env.ts`) check for a login
-  before the run starts. Without the check, a `'subscription'` agent on a
-  machine with no login fails somewhere inside the SDK with an authentication
+- **Preflight, not discovery.** `loadSubscriptionCredential`
+  (`apps/worker/src/lib/agent-env.ts`) resolves the credential before the run
+  starts. Without the check, a `'subscription'` agent with nothing to
+  authenticate as fails somewhere inside the SDK with an authentication
   error that never mentions `auth_mode`, and the task lands `'failed'` looking
   like a model problem. Task runs fail fast with
   `NO_SUBSCRIPTION_CREDENTIAL_ERROR`; manager and direct-chat threads reply
@@ -764,6 +764,43 @@ moving a fleet onto one.
   *would* have cost on the API — and writing it would inflate a dashboard the
   owner reads as money spent, while writing `0` would read as "this run was
   free" rather than "this run was not billed per token".
+
+### Where a subscription run's credential comes from (migration 0014)
+
+`resolveSubscriptionCredential` (`apps/worker/src/lib/agent-env.ts`) takes the
+first of three, most specific first:
+
+1. **`profiles.claude_code_oauth_token`** — the token the project's owner
+   pasted under Settings → Claude Code subscription, injected into that one
+   subprocess as `CLAUDE_CODE_OAUTH_TOKEN`. Assigned *after* the environment is
+   copied, so it outranks a machine-wide variable of the same name: the run
+   spends the quota of whoever owns the agent.
+2. **`CLAUDE_CODE_OAUTH_TOKEN`** in the worker's own environment — the whole
+   machine's token, and what every pre-0014 deployment already uses.
+3. **The Claude Code login under `~/.claude`**, which survives because
+   `buildAgentEnv` keeps `HOME`.
+
+Owner-scoped rather than one value per deployment, because the quota belongs to
+a person's subscription and not to the box: with a single shared token, one
+account's agents spend another account's subscription.
+
+Stored in plaintext, unlike the hashed `api_tokens` (0012), because this
+credential is *replayed* into a subprocess rather than recognised — a one-way
+function is not an option. The control is the same one `agents.mcp_servers`
+already relies on: no table is readable by the anon or authenticated roles
+(0002), so reading the column means holding the service key. Beyond that, it is
+never selected into anything the browser receives — every server-side profile
+read uses `PROFILE_SUMMARY_COLUMNS` (`apps/web/src/lib/api/profile.ts`) and the
+`ProfileSummary` type makes a slip a compile error; Settings shows a hint and a
+timestamp, and `/api/profile/claude-token` has no `GET`.
+
+The point of the move is rotation. The credential used to be deploy-time
+configuration, so replacing a token meant editing `.env` on the server and
+recreating the worker container (an `--env-file` is read when the container is
+*created*, so a restart keeps serving the old value), which put a routine
+credential change behind SSH and killed in-flight runs. Both
+`loadSubscriptionCredential` and `buildAgentEnv` run per run, so a token saved
+in Settings is live on the next task with nothing restarted.
 
 ## Fleet MCP endpoint (migration 0012)
 
@@ -811,8 +848,9 @@ account. Guide: [docs/FLEET-MCP-SERVER.md](docs/FLEET-MCP-SERVER.md).
 ## Environment
 
 See `.env.example`: Supabase URL/keys, `ANTHROPIC_API_KEY`
-(with `CLAUDE_CODE_OAUTH_TOKEN` as its counterpart for `auth_mode`
-`'subscription'` agents — see "Agent auth mode"),
+(with `CLAUDE_CODE_OAUTH_TOKEN` as an optional machine-wide fallback for
+`auth_mode` `'subscription'` agents, whose usual credential is the token their
+owner saved in Settings — see "Agent auth mode"),
 `TELEGRAM_BOT_TOKEN`, `GITHUB_TOKEN`, `WORKSPACES_ROOT`, `WEB_URL`,
 `KNOWLEDGE_SWEEP_AFTER_RUNS`, `KNOWLEDGE_INJECTION`,
 `WORKER_MAX_CONCURRENT_TASKS` (default 5 — each run spawns an SDK subprocess,

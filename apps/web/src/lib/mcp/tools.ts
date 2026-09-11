@@ -267,10 +267,11 @@ const agentConfigJsonSchema = {
     enum: [...AGENT_AUTH_MODES],
     description:
       "Which credential this agent's runs authenticate with. 'api' bills the " +
-      "Anthropic API per token. 'subscription' runs on the worker machine's own " +
-      "Claude Code login instead, drawing on its quota — cheaper for bulk work, " +
-      "but the quota is shared with every other subscription agent and stalls them " +
-      "all when it runs out, and such runs record no cost_usd.",
+      "Anthropic API per token. 'subscription' runs on the Claude Code token the " +
+      "account owner saved in Settings (falling back to the worker machine's own " +
+      "login), drawing on its quota — cheaper for bulk work, but the quota is " +
+      "shared with every other subscription agent and stalls them all when it runs " +
+      "out, and such runs record no cost_usd.",
   },
 } as const;
 

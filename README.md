@@ -153,7 +153,9 @@ Apply **all** migrations in `supabase/migrations/`, in filename order:
 - `0012_api_tokens.sql` — personal access tokens, which authenticate the
   fleet's own MCP endpoint (`/api/mcp`).
 - `0013_agent_auth_mode.sql` — per-agent choice between billing the Anthropic
-  API and running on the worker machine's own Claude Code subscription.
+  API and running on a Claude Code subscription.
+- `0014_owner_claude_token.sql` — the owner's Claude Code token, pasted in
+  Settings, so rotating it is not a deployment.
 
 **Option A — Supabase CLI (recommended):**
 

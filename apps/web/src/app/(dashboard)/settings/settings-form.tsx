@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { Check, MessageCircle, RefreshCw } from "lucide-react";
-import type { Profile } from "@agent-fleet/shared";
+import type { ProfileSummary } from "@agent-fleet/shared";
 import { api } from "@/lib/api-client";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -21,7 +21,7 @@ export function SettingsForm({
   initialProfile,
 }: {
   email: string;
-  initialProfile: Profile | null;
+  initialProfile: ProfileSummary | null;
 }) {
   const [displayName, setDisplayName] = React.useState(
     initialProfile?.display_name ?? "",
@@ -44,7 +44,7 @@ export function SettingsForm({
     setProfileError(null);
     setSaved(false);
     try {
-      await api<{ profile: Profile }>("/api/profile", {
+      await api<{ profile: ProfileSummary }>("/api/profile", {
         method: "PATCH",
         body: JSON.stringify({ displayName: displayName.trim() || null }),
       });

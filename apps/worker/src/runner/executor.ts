@@ -18,7 +18,7 @@ import {
 import {
   buildAgentEnv,
   buildToolLimits,
-  describeSubscriptionCredential,
+  loadSubscriptionCredential,
   NO_SUBSCRIPTION_CREDENTIAL_ERROR,
 } from "../lib/agent-env.js";
 import { logger, RunLogWriter } from "../lib/logger.js";
@@ -137,13 +137,17 @@ export class TaskExecutor {
     const runState: RunState = { pendingActionsCreated: 0, activityReadThrough: null };
 
     try {
-      // 2. Fail fast when the agent runs on the machine's Claude Code
-      //    subscription (0013) and this machine has no login to offer —
-      //    inside the SDK the same problem surfaces as an opaque auth error.
+      // 2. Fail fast when the agent runs on a Claude Code subscription (0013)
+      //    and there is no credential to run it with — the owner's saved token
+      //    (0014) or, failing that, the worker machine's own login. Inside the
+      //    SDK the same problem surfaces as an opaque auth error.
       const authMode = agent.auth_mode ?? "api";
-      const subscriptionCredential =
-        authMode === "subscription" ? describeSubscriptionCredential() : null;
-      if (authMode === "subscription" && !subscriptionCredential) {
+      const credential = await loadSubscriptionCredential(
+        this.supabase,
+        authMode,
+        task.project_id,
+      );
+      if (!credential) {
         await runLog.write("error", { message: NO_SUBSCRIPTION_CREDENTIAL_ERROR }, "error");
         await this.markRun(run.id, "failed", NO_SUBSCRIPTION_CREDENTIAL_ERROR, null);
         await this.finishTask(task, agent, "failed", NO_SUBSCRIPTION_CREDENTIAL_ERROR);
@@ -204,7 +208,7 @@ export class TaskExecutor {
         // The worker's secrets stay out of the agent's shell, and the agent's
         // built-in tools are capped by its own config (0009) — neither is
         // negotiable by prompt, which matters under bypassPermissions.
-        env: buildAgentEnv(authMode),
+        env: buildAgentEnv(authMode, credential),
         ...buildToolLimits(agent),
         stderr: (data: string) => {
           const line = data.trim();
@@ -220,7 +224,7 @@ export class TaskExecutor {
         cwd,
         mcp_servers: Object.keys(mcpServers),
         auth_mode: authMode,
-        auth_source: subscriptionCredential ?? "ANTHROPIC_API_KEY",
+        auth_source: credential.source,
       });
 
       // 6. Stream SDK messages into run_logs and capture the final result

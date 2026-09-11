@@ -1,5 +1,6 @@
 import { redirect } from "next/navigation";
-import type { Profile, Project } from "@agent-fleet/shared";
+import type { ProfileSummary, Project } from "@agent-fleet/shared";
+import { PROFILE_SUMMARY_COLUMNS } from "@/lib/api/profile";
 import { getSessionUser } from "@/lib/api/page-data";
 import { getAdminClient } from "@/lib/supabase/admin";
 import { Sidebar } from "@/components/sidebar";
@@ -19,7 +20,11 @@ export default async function DashboardLayout({
       .select("*")
       .eq("owner_id", user.id)
       .order("created_at", { ascending: false }),
-    admin.from("profiles").select("*").eq("id", user.id).maybeSingle(),
+    admin
+      .from("profiles")
+      .select(PROFILE_SUMMARY_COLUMNS)
+      .eq("id", user.id)
+      .maybeSingle(),
   ]);
 
   return (
@@ -27,7 +32,7 @@ export default async function DashboardLayout({
       <Sidebar
         projects={(projects ?? []) as Project[]}
         email={user.email ?? ""}
-        displayName={(profile as Profile | null)?.display_name ?? null}
+        displayName={(profile as ProfileSummary | null)?.display_name ?? null}
       />
       <main className="min-h-0 min-w-0 flex-1 overflow-y-auto">{children}</main>
     </div>

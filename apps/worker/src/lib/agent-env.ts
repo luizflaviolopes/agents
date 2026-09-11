@@ -1,8 +1,10 @@
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Agent, AgentAuthMode } from "@agent-fleet/shared";
 import { connectorDeniedTools } from "@agent-fleet/shared";
+import { logger } from "./logger.js";
 
 /**
  * The worker's own secrets, kept out of the environment an agent's shell
@@ -65,12 +67,34 @@ function isWorkerSecret(name: string, authMode: AgentAuthMode): boolean {
 }
 
 /**
+ * Where one run's credentials come from, resolved before the run starts.
+ *
+ * `token` is set only when the credential has to be INJECTED — the owner's
+ * saved token (0014). The other sources are already reachable by the
+ * subprocess (an environment variable it inherits, a login on disk it reads),
+ * so they carry no token and only name themselves for the log.
+ */
+export interface SubscriptionCredential {
+  /** Injected as CLAUDE_CODE_OAUTH_TOKEN, or null when nothing need be added. */
+  token: string | null;
+  /** Human-readable source, recorded in run_logs as `auth_source`. */
+  source: string;
+}
+
+/**
  * The environment for one agent subprocess: the worker's, minus its secrets,
- * minus the API credentials when the agent runs on the machine's Claude Code
- * subscription (0013). Pass as the SDK's `env` option.
+ * minus the API credentials when the agent runs on a Claude Code subscription
+ * (0013), plus the owner's saved token when that is what it runs on (0014).
+ * Pass as the SDK's `env` option.
+ *
+ * The saved token is assigned AFTER the copy, so it outranks a
+ * CLAUDE_CODE_OAUTH_TOKEN the worker itself inherited. Deliberate: the agent
+ * belongs to an owner, and it is that owner's quota the run is meant to spend
+ * — a machine-wide token is the fallback for when they have saved none.
  */
 export function buildAgentEnv(
   authMode: AgentAuthMode = "api",
+  credential: SubscriptionCredential | null = null,
   source: NodeJS.ProcessEnv = process.env,
 ): Record<string, string> {
   const env: Record<string, string> = {};
@@ -79,53 +103,124 @@ export function buildAgentEnv(
     if (isWorkerSecret(name, authMode)) continue;
     env[name] = value;
   }
+  if (authMode === "subscription" && credential?.token) {
+    env.CLAUDE_CODE_OAUTH_TOKEN = credential.token;
+  }
   return env;
 }
 
 /**
- * Where a 'subscription' run would get its credentials, or null if this
- * machine has none to offer.
+ * Where a 'subscription' run would get its credentials, or null if there are
+ * none to offer.
  *
- * Checked before the run rather than discovered during it: with the API key
+ * Resolved before the run rather than discovered during it: with the API key
  * stripped and nothing behind it, the SDK fails somewhere inside the
  * subprocess with a message about authentication that says nothing about
  * auth_mode, and the task lands 'failed' for what looks like a model problem.
  *
- * macOS keeps the login in the Keychain rather than on disk, so there is
+ * Order, most specific first:
+ *   1. the token the owner saved in Settings (0014) — theirs, rotatable
+ *      without touching the deployment;
+ *   2. CLAUDE_CODE_OAUTH_TOKEN in the worker's environment — the whole
+ *      machine's, and what every pre-0014 deployment already uses;
+ *   3. the Claude Code login on disk under ~/.claude.
+ *
+ * macOS keeps that login in the Keychain rather than on disk, so there is
  * nothing to stat there — it reports the login as present and lets the run
  * be the judge. A false positive costs one clear SDK error; a false negative
  * would block a machine that is correctly logged in.
  */
-export function describeSubscriptionCredential(
+export function resolveSubscriptionCredential(
+  ownerToken: string | null = null,
   source: NodeJS.ProcessEnv = process.env,
-): string | null {
-  if (source.CLAUDE_CODE_OAUTH_TOKEN) return "CLAUDE_CODE_OAUTH_TOKEN";
-  if (process.platform === "darwin") return "the Claude Code login (macOS Keychain)";
+): SubscriptionCredential | null {
+  if (ownerToken) {
+    return { token: ownerToken, source: "the owner's saved Claude Code token" };
+  }
+  if (source.CLAUDE_CODE_OAUTH_TOKEN) {
+    return { token: null, source: "CLAUDE_CODE_OAUTH_TOKEN" };
+  }
+  if (process.platform === "darwin") {
+    return { token: null, source: "the Claude Code login (macOS Keychain)" };
+  }
   const home = source.HOME ?? source.USERPROFILE ?? homedir();
   if (home && existsSync(join(home, ".claude", ".credentials.json"))) {
-    return "the Claude Code login under ~/.claude";
+    return { token: null, source: "the Claude Code login under ~/.claude" };
   }
   return null;
 }
 
 /**
- * Whether this machine can authenticate a run in the given mode. 'api' is
- * always true — an absent or invalid ANTHROPIC_API_KEY is the SDK's own
- * error to report, and it reports it clearly.
+ * The credential one run will authenticate with, given the agent's auth mode
+ * and the project it belongs to. Null means the run cannot be authenticated
+ * and must fail with NO_SUBSCRIPTION_CREDENTIAL_ERROR before it starts.
+ *
+ * 'api' never returns null — an absent or invalid ANTHROPIC_API_KEY is the
+ * SDK's own error to report, and it reports it clearly.
  */
-export function hasAuthCredential(
+export async function loadSubscriptionCredential(
+  supabase: SupabaseClient,
   authMode: AgentAuthMode,
-  source: NodeJS.ProcessEnv = process.env,
-): boolean {
-  return authMode !== "subscription" || describeSubscriptionCredential(source) !== null;
+  projectId: string,
+): Promise<SubscriptionCredential | null> {
+  if (authMode !== "subscription") {
+    return { token: null, source: "ANTHROPIC_API_KEY" };
+  }
+  return resolveSubscriptionCredential(await loadOwnerClaudeToken(supabase, projectId));
 }
 
-/** The error a 'subscription' run fails with when this machine has no login. */
+/**
+ * The Claude Code token saved by whoever owns this project, or null.
+ *
+ * Two queries rather than one embedded select: profiles and projects both
+ * reference auth.users, but there is no foreign key BETWEEN them, so PostgREST
+ * has no relationship to embed across. This runs once per subscription run,
+ * against two primary-key lookups.
+ *
+ * A failure here is logged and treated as "no saved token" rather than thrown:
+ * the caller falls through to the machine's own credentials, and if there are
+ * none the run fails with the message that explains what to do about it.
+ */
+async function loadOwnerClaudeToken(
+  supabase: SupabaseClient,
+  projectId: string,
+): Promise<string | null> {
+  try {
+    const { data: project, error: projectError } = await supabase
+      .from("projects")
+      .select("owner_id")
+      .eq("id", projectId)
+      .maybeSingle();
+    if (projectError || !project?.owner_id) {
+      if (projectError) {
+        logger.error("agent-env", `failed to load owner of project ${projectId}: ${projectError.message}`);
+      }
+      return null;
+    }
+
+    const { data: profile, error: profileError } = await supabase
+      .from("profiles")
+      .select("claude_code_oauth_token")
+      .eq("id", project.owner_id)
+      .maybeSingle();
+    if (profileError) {
+      logger.error("agent-env", `failed to load Claude token for owner of project ${projectId}: ${profileError.message}`);
+      return null;
+    }
+    return (profile?.claude_code_oauth_token as string | null) ?? null;
+  } catch (err) {
+    logger.error("agent-env", `failed to resolve the saved Claude token for project ${projectId}`, err);
+    return null;
+  }
+}
+
+/** The error a 'subscription' run fails with when no credential can be found. */
 export const NO_SUBSCRIPTION_CREDENTIAL_ERROR =
-  "This agent is set to run on the machine's Claude Code subscription, but the worker " +
-  "has no Claude Code credentials: CLAUDE_CODE_OAUTH_TOKEN is unset and there is no " +
-  "login under ~/.claude. Run `claude setup-token` on the worker machine and set " +
-  "CLAUDE_CODE_OAUTH_TOKEN, or switch this agent's auth mode back to 'api'.";
+  "This agent is set to run on a Claude Code subscription, but there are no Claude Code " +
+  "credentials to run it with: no token is saved under Settings → Claude Code subscription, " +
+  "CLAUDE_CODE_OAUTH_TOKEN is unset on the worker, and there is no login under ~/.claude. " +
+  "Run `claude setup-token`, paste what it prints into Settings, or switch this agent's " +
+  "billing back to the Anthropic API.";
 
 /**
  * An agent's tool limits, as SDK options: the owner's built-in allow/deny

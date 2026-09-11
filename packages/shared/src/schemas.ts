@@ -329,3 +329,35 @@ export const createApiTokenSchema = z.object({
   expiresInDays: z.number().int().min(1).max(3650).optional(),
 });
 export type CreateApiTokenInput = z.infer<typeof createApiTokenSchema>;
+
+// ---------------------------------------------------------------------------
+// Claude Code subscription token (migration 0014)
+// ---------------------------------------------------------------------------
+
+/**
+ * The token the owner pastes in Settings, used by their 'subscription' agents.
+ *
+ * Only the shape a paste can get wrong is checked here. The real test is a run:
+ * a token that parses but has been revoked fails inside the SDK, which the
+ * executor already surfaces (a 'success' result that spent no tokens is treated
+ * as a failure). Validating harder — an exact prefix, an exact length — would
+ * turn a change in Anthropic's token format into a fleet that cannot be
+ * configured at all.
+ */
+export const saveClaudeTokenSchema = z.object({
+  token: z
+    .string()
+    .trim()
+    .min(20, "That does not look like a Claude Code token — it is too short.")
+    .max(500)
+    .refine((value) => !/\s/.test(value), "A token contains no spaces — check the paste.")
+    // An API key here would be stored, injected as CLAUDE_CODE_OAUTH_TOKEN and
+    // rejected at run time with an authentication error that says nothing about
+    // which credential was wrong. It is also the single most likely paste: both
+    // strings start with sk-ant-, and the owner already has an API key.
+    .refine(
+      (value) => !value.startsWith("sk-ant-api"),
+      "That is an Anthropic API key, not a Claude Code token. Run `claude setup-token` and paste what it prints.",
+    ),
+});
+export type SaveClaudeTokenInput = z.infer<typeof saveClaudeTokenSchema>;
